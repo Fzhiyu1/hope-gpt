@@ -19,12 +19,14 @@ import sys
 import os
 import torch
 import torch.nn.functional as F
-from model.tokenizer import BPETokenizer, load_tokenizer_from_checkpoint
+from model.tokenizer import BPETokenizer, HFBPETokenizer, load_tokenizer_from_checkpoint
 try:
-    from model.tokenizer import HFBPETokenizer
+    import tokenizers as _tok_lib
     USE_HF_TOKENIZER = True
+    print('使用 HuggingFace tokenizers（Rust 加速）')
 except ImportError:
     USE_HF_TOKENIZER = False
+    print('未安装 tokenizers 库，使用纯 Python BPE（较慢）')
 from model.hope import HopeGPT
 from model.m3_optimizer import M3Optimizer
 
