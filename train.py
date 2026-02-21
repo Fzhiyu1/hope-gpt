@@ -12,7 +12,7 @@ Mini-GPT 训练脚本
 import sys
 import torch
 import torch.nn.functional as F
-from model.tokenizer import CharTokenizer
+from model.tokenizer import BPETokenizer
 from model.gpt import MiniGPT
 
 
@@ -26,8 +26,8 @@ with open(data_file, 'r') as f:
     text = f.read()
 print(f'训练数据: {data_file}')
 
-# 创建 tokenizer，把文字变成数字
-tokenizer = CharTokenizer(text)
+# 创建 BPE tokenizer，从文本学习分词规则
+tokenizer = BPETokenizer.train([text], target_vocab_size=8000)
 data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
 
 print(f'训练文本: {len(text)} 个字符')
@@ -130,9 +130,10 @@ print(f'\n训练完成！最终 loss = {loss.item():.4f}')
 # 保存模型
 save_path = f'checkpoints/mini-gpt-{max_steps}steps.pt'
 torch.save({
-    'model': model.state_dict(),        # 模型参数（所有矩阵的数字）
-    'tokenizer_text': text,             # 用于重建 tokenizer 的原始文本
-    'config': {                         # 模型配置（重建模型结构需要）
+    'model': model.state_dict(),
+    'tokenizer_type': 'bpe',
+    'tokenizer_data': tokenizer.save_vocab(),
+    'config': {
         'vocab_size': tokenizer.vocab_size,
         'd_model': d_model,
         'n_heads': n_heads,
