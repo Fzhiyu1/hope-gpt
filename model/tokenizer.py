@@ -243,14 +243,75 @@ class BPETokenizer:
         return tokenizer
 
 
+class HFBPETokenizer:
+    """
+    BPE 分词器 — HuggingFace tokenizers 引擎（Rust 实现，快 100 倍）
+
+    接口与 BPETokenizer 完全一致，可无缝替换。
+    需要安装：pip install tokenizers
+    """
+
+    UNK_TOKEN = '<UNK>'
+
+    def __init__(self, hf_tokenizer):
+        self._tok = hf_tokenizer
+        self.vocab_size = hf_tokenizer.get_vocab_size()
+
+    @classmethod
+    def train(cls, texts, target_vocab_size=8000):
+        from tokenizers import Tokenizer
+        from tokenizers.models import BPE
+        from tokenizers.trainers import BpeTrainer
+        from tokenizers.pre_tokenizers import Sequence, UnicodeScripts, Digits
+
+        tok = Tokenizer(BPE(unk_token=cls.UNK_TOKEN))
+        tok.pre_tokenizer = Sequence([
+            UnicodeScripts(),
+            Digits(individual_digits=True),
+        ])
+
+        trainer = BpeTrainer(
+            vocab_size=target_vocab_size,
+            special_tokens=[cls.UNK_TOKEN],
+            min_frequency=2,
+        )
+
+        tok.train_from_iterator(texts, trainer=trainer)
+
+        print(f'HF BPE 训练完成：词表 {tok.get_vocab_size()}')
+        return cls(tok)
+
+    def encode(self, text):
+        return self._tok.encode(text).ids
+
+    def decode(self, indices):
+        return self._tok.decode(indices)
+
+    def save_vocab(self):
+        return {
+            'tokenizer_json': self._tok.to_str(),
+            'vocab_size': self.vocab_size,
+        }
+
+    @classmethod
+    def load_vocab(cls, data):
+        from tokenizers import Tokenizer
+        tok = Tokenizer.from_str(data['tokenizer_json'])
+        return cls(tok)
+
+
 def load_tokenizer_from_checkpoint(checkpoint):
     """
     根据 checkpoint 内容自动选择正确的 tokenizer。
 
-    - 新格式（有 tokenizer_type='bpe'）→ BPETokenizer
+    - tokenizer_type='hf_bpe' → HFBPETokenizer
+    - tokenizer_type='bpe' → BPETokenizer
     - 旧格式（有 tokenizer_text）→ CharTokenizer
     """
-    if checkpoint.get('tokenizer_type') == 'bpe':
+    tok_type = checkpoint.get('tokenizer_type')
+    if tok_type == 'hf_bpe':
+        return HFBPETokenizer.load_vocab(checkpoint['tokenizer_data'])
+    elif tok_type == 'bpe':
         return BPETokenizer.load_vocab(checkpoint['tokenizer_data'])
     else:
         return CharTokenizer(checkpoint['tokenizer_text'])

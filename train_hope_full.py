@@ -20,6 +20,11 @@ import os
 import torch
 import torch.nn.functional as F
 from model.tokenizer import BPETokenizer, load_tokenizer_from_checkpoint
+try:
+    from model.tokenizer import HFBPETokenizer
+    USE_HF_TOKENIZER = True
+except ImportError:
+    USE_HF_TOKENIZER = False
 from model.hope import HopeGPT
 from model.m3_optimizer import M3Optimizer
 
@@ -62,7 +67,7 @@ n_layers = 8
 d_memory = 256          # Titans 记忆模块内部维度
 chunk_size = 16         # Titans 分块大小
 context_length = 128
-learning_rate = 3e-4    # 比 Hope-Attention 的 1e-3 更小（DGD 需要更稳的外层学习率）
+learning_rate = 1e-3
 cms_chunk_sizes = [1, 16, 128, 1024]
 
 if resume_path:
@@ -96,7 +101,10 @@ else:
     with open(data_file, 'r') as f:
         text = f.read()
 
-    tokenizer = BPETokenizer.train([text], target_vocab_size=8000)
+    if USE_HF_TOKENIZER:
+        tokenizer = HFBPETokenizer.train([text], target_vocab_size=8000)
+    else:
+        tokenizer = BPETokenizer.train([text], target_vocab_size=2000)
     data = torch.tensor(tokenizer.encode(text), dtype=torch.long)
 
     model = HopeGPT(
@@ -124,7 +132,7 @@ print(f'CMS 频率层级: {cms_chunk_sizes}')
 # 第三步：训练
 # ============================================================
 
-def get_batch(batch_size=4):
+def get_batch(batch_size=16):
     max_start = len(data) - context_length - 1
     starts = torch.randint(0, max_start, (batch_size,))
     x = torch.stack([data[s:s + context_length] for s in starts])
@@ -182,7 +190,12 @@ print(f'累计训练步数: {total_steps_so_far}')
 os.makedirs('checkpoints', exist_ok=True)
 save_path = f'checkpoints/hope-full-{total_steps_so_far}steps.pt'
 
-if isinstance(tokenizer, BPETokenizer):
+if USE_HF_TOKENIZER and isinstance(tokenizer, HFBPETokenizer):
+    tok_save = {
+        'tokenizer_type': 'hf_bpe',
+        'tokenizer_data': tokenizer.save_vocab(),
+    }
+elif isinstance(tokenizer, BPETokenizer):
     tok_save = {
         'tokenizer_type': 'bpe',
         'tokenizer_data': tokenizer.save_vocab(),
