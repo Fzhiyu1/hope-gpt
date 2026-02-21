@@ -9,6 +9,7 @@ Mini-GPT 训练脚本
 重复几千次，模型就学会了。
 """
 
+import sys
 import torch
 import torch.nn.functional as F
 from model.tokenizer import CharTokenizer
@@ -19,9 +20,11 @@ from model.gpt import MiniGPT
 # 第一步：准备数据
 # ============================================================
 
-# 读取训练文本
-with open('data/sample.txt', 'r') as f:
+# 读取训练文本（可通过第二个参数指定文件，默认用千字文）
+data_file = sys.argv[2] if len(sys.argv) > 2 else 'data/sample.txt'
+with open(data_file, 'r') as f:
     text = f.read()
+print(f'训练数据: {data_file}')
 
 # 创建 tokenizer，把文字变成数字
 tokenizer = CharTokenizer(text)
@@ -37,13 +40,13 @@ print(f'编码后: {len(data)} 个 token')
 # ============================================================
 
 # 超参数（可以调的旋钮）
-d_model = 64          # 向量维度
-n_heads = 4           # 注意力头数
-n_layers = 4          # 变换器块层数
-context_length = 64   # 上下文窗口：模型一次看多少个字
+d_model = 256         # 向量维度（64→256，信息容量大4倍）
+n_heads = 8           # 注意力头数（4→8，更多视角）
+n_layers = 8          # 变换器块层数（4→8，理解更深）
+context_length = 128  # 上下文窗口（64→128，看更远）
 learning_rate = 1e-3  # 学习率：每步调整参数的幅度
-max_steps = 2000      # 训练多少步
-print_every = 100     # 每多少步打印一次
+max_steps = int(sys.argv[1]) if len(sys.argv) > 1 else 2000  # 命令行指定步数，默认 2000
+print_every = max(1, max_steps // 20)  # 自动调整打印频率
 
 # 选设备：优先用 Mac GPU（MPS），否则用 CPU
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -124,6 +127,21 @@ for step in range(max_steps):
 
 print(f'\n训练完成！最终 loss = {loss.item():.4f}')
 
+# 保存模型
+save_path = f'checkpoints/mini-gpt-{max_steps}steps.pt'
+torch.save({
+    'model': model.state_dict(),        # 模型参数（所有矩阵的数字）
+    'tokenizer_text': text,             # 用于重建 tokenizer 的原始文本
+    'config': {                         # 模型配置（重建模型结构需要）
+        'vocab_size': tokenizer.vocab_size,
+        'd_model': d_model,
+        'n_heads': n_heads,
+        'n_layers': n_layers,
+        'context_length': context_length,
+    }
+}, save_path)
+print(f'模型已保存到 {save_path}')
+
 
 # ============================================================
 # 第五步：生成文本（看看模型学到了什么）
@@ -174,7 +192,7 @@ def generate(prompt, max_new_tokens=100):
 # 试试生成效果
 print('\n===== 生成测试 =====\n')
 
-prompts = ['天地', '海咸', '云腾']
+prompts = ['嵌套学习', '注意力', '模型']
 for p in prompts:
     result = generate(p, max_new_tokens=20)
     print(f'输入: "{p}"')

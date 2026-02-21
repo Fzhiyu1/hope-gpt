@@ -1,0 +1,1710 @@
+# 嵌套学习：深度学习架构的幻象
+
+**Ali Behrouz, Meisam Razaviyayn, Peilin Zhong, and Vahab Mirrokni**
+
+> arXiv:2512.24695v1 [cs.LG] 31 Dec 2025
+>
+> 通讯邮箱: {alibehrouz, razaviyayn, mirrokni}@google.com and peilin.zhong@columbia.edu.
+>
+> 本工作的一个版本已发表于神经信息处理系统大会（NeurIPS）2025。
+
+---
+
+## 摘要
+
+在过去数十年中，开发更强大的神经网络架构，同时设计能有效训练这些架构的优化算法，一直是提升机器学习模型能力研究工作的核心。尽管近年来取得了显著进展——尤其是在语言模型（Language Models, LMs）的开发方面——但关于这些模型如何持续学习/记忆、自我改进以及找到有效解决方案，仍存在根本性的挑战和未解之问。本文提出了一种新的学习范式，称为**嵌套学习（Nested Learning, NL）**，它将机器学习模型一致地表示为一组嵌套的、多层级的和/或并行的优化问题，其中每个问题拥有自身的"上下文流（context flow）"。通过嵌套学习的视角，现有的深度学习（deep learning）方法通过压缩自身的上下文流从数据中学习，而上下文学习（in-context learning）则在大型模型中自然涌现。嵌套学习提出了一种设计哲学，通过增加更多"层级"来设计更具表达力（expressive）的学习算法，从而实现更高阶的上下文学习，并有望释放有效的持续学习（continual learning）能力。除了其神经科学方面的动机外，我们通过以下三项核心贡献来支持嵌套学习：
+
+1. **富有表达力的优化器（Expressive Optimizers）：** 我们表明，已知的基于梯度的优化器（如 Adam、带动量的 SGD 等）实际上是联想记忆（associative memory）模块，其目标是（通过梯度下降（gradient descent））压缩梯度信息。基于这一洞察，我们提出了具有深层记忆和/或更强学习规则的其他"更具表达力"的优化器；
+2. **自修改学习模块（Self-Modifying Learning Module）：** 利用嵌套学习对学习算法的洞察，我们提出了一种序列模型，该模型通过学习自身的更新算法来学习如何修改自身；以及
+3. **连续记忆系统（Continuum Memory System）：** 我们提出了一种新的记忆系统形式化方法，推广了传统的"长期/短期记忆"观点。将我们的自修改序列模型与连续记忆系统相结合，我们提出了一个持续学习模块，称为 **Hope**，在语言建模、知识整合、少样本泛化任务、持续学习以及长上下文推理任务中展现了令人期待的结果。
+
+> *"我们无法用制造问题时的同一种思维来解决问题！"*
+> *"We cannot solve our problems with the same thinking we used when we created them!"*
+> — 出自 Albert Einstein
+
+---
+
+## 1 引言
+
+数十年来，人工智能研究一直聚焦于设计能够从数据 (Pitts 1943; McCulloch et al. 1948; McCulloch 1949; Samuel 1959) 或经验 (Sutton et al. 1998; Connell et al. 1999; Silver et al. 2025) 中学习的机器学习算法；通常通过基于梯度的方法优化参数 $\boldsymbol{\theta} \in \Theta$ 上的目标函数 $\mathcal{L}(\boldsymbol{\theta})$。传统的机器学习技术需要精心的工程设计和领域专业知识来设计特征提取器，这限制了其直接处理和从自然数据中学习的能力 (LeCun et al. 2015)，而深度表征学习（deep representation learning）提供了一种完全自动化的替代方案来发现任务所需的表征。此后，深度学习成为大规模计算模型中不可分割的一部分，在化学和生物学 (Jumper et al. 2021)、博弈 (Silver et al. 2016, 2018)、计算机视觉 (Krizhevsky et al. 2012; Dosovitskiy et al. 2021) 以及多模态和自然语言理解 (Achiam et al. 2023; Liu et al. 2024a; Comanici et al. 2025) 等领域取得了开创性成功。
+
+多层堆叠——正如深度学习模型中所做的那样——为模型提供了更强的表达能力以表征复杂特征，以及更多的内部计算量（如 #FLOPS）(Montúfar et al. 2014; Poole et al. 2016; Hestness et al. 2017)，所有这些对于需要在先验固定集合上进行分布内预测的静态任务来说都是关键且理想的特性。然而，这种深度设计并非解决所有挑战的万能方案，也无法在多个方面帮助提升模型的表达能力，例如：
+
+- **(i)** 深度模型的计算深度可能不会随着层数增加而改变 (Merrill et al. 2022; Sanford et al. 2024)，使得其实现复杂算法的能力与传统浅层方法相比并无提升 (Merrill et al. 2024)；
+- **(ii)** 某些类别参数的容量可能随着模型深度/宽度的增加而仅呈现边际改善 (Kaplan et al. 2020)；
+- **(iii)** 训练过程可能收敛到次优解，主要原因在于优化器或其超参数的选择不够理想；以及
+- **(iv)** 模型快速适应新任务、持续学习和/或泛化到分布外数据的能力可能不会因堆叠更多层而改变，需要更精心的设计。
+
+克服上述挑战并增强深度学习模型能力的核心工作集中在：
+
+1. 开发更具表达力的参数类别（即神经网络架构）(Fukushima 1980; Schmidhuber et al. 1997; Krizhevsky et al. 2012; Vaswani et al. 2017; Behrouz et al. 2025c)；
+2. 引入能更好建模任务的目标函数 (Rumelhart et al. 1986; Kingma et al. 2014b; Hjelm et al. 2019; Goodfellow et al. 2020; Alshammari et al. 2025)；
+3. 设计更高效/有效的优化算法以找到更好的解或具有更强抗遗忘能力 (Kingma et al. 2014a; Gupta et al. 2018; Farajtabar et al. 2020; Jordan et al. 2024)；以及
+4. 在对架构、目标函数和优化算法做出"正确"选择的前提下，扩大模型规模以增强其表达能力 (Brown et al. 2020; Kaplan et al. 2020; Hoffmann et al. 2022)。
+
+总体而言，这些进展以及关于深度模型缩放规律的新发现，奠定了大语言模型（Large Language Models, LLMs）构建的基础。
+
+大语言模型的发展标志着深度学习研究的一个关键里程碑：从面向特定任务的模型向更通用系统的范式转变，这些系统通过缩放"正确"的架构而涌现出多种能力 (Brown et al. 2020; Schaeffer et al. 2023)。尽管大语言模型在多样化的任务集合上取得了巨大成功和卓越能力 (Nijkamp et al. 2023; Wang et al. 2023; Comanici et al. 2025)，但它们在初始部署阶段之后基本上是静态的，这意味着它们能成功执行在预训练（pre-training）或后训练阶段学到的任务，但无法在其即时上下文之外持续获取新能力。大语言模型中唯一具有适应性的组件是其上下文学习能力——这是大语言模型的一种（已知为涌现的）特性，使其能快速适应上下文从而执行零样本或少样本任务 (Brown et al. 2020)。在上下文学习之外，近期克服大语言模型静态性质的努力要么计算成本高昂，要么需要外部组件，要么缺乏泛化能力，和/或可能遭受灾难性遗忘 (Akyürek et al. 2024a; Eyuboglu et al. 2025; yu et al. 2025)，这促使研究人员质疑是否需要重新审视机器学习模型的设计方式，以及是否需要一种超越层堆叠的新学习范式来释放大语言模型在持续学习场景中的能力。
+
+**当前模型只能感知即时的当下。** 作为类比，为了更好地说明大语言模型的静态性质，我们使用顺行性遗忘症（anterograde amnesia）的例子——这是一种神经系统疾病，患者在发病后无法形成新的长期记忆，而已有记忆保持完整 (Scoville et al. 1957)。这种情况将患者的知识和经验限制在一个短暂的当下窗口和遥远的过去——发病之前——这导致其持续地将即时的当下体验为全新的。当前大语言模型的记忆处理系统遭受着类似的模式。它们的知识要么局限于适配其上下文窗口的即时上下文，要么局限于 MLP 中存储的遥远过去的知识——即"预训练结束"这一发病前的知识。这一类比促使我们从神经生理学文献以及大脑如何巩固短期记忆中汲取灵感。
+
+> **图 1：** 大脑中统一且可复用的结构以及多时间尺度更新是解锁人类持续学习能力的关键组件。嵌套学习（NL）允许大脑的每个组件进行多时间尺度更新，同时揭示了诸如 Transformer 等知名架构实际上是具有不同频率更新的线性层。
+
+---
+
+### 1.1 人脑视角与神经生理学动机
+
+人脑在持续学习方面具有高度的效率和效能，这通常归因于神经可塑性（neuroplasticity）——大脑在面对新经验、记忆、学习甚至损伤时改变自身的卓越能力 (Pascual-Leone et al. 2005; Johnston 2009)。近期研究支持这样一种观点：长期记忆的形成至少涉及两个不同但互补的巩固过程 (Frey et al. 1997; Goto et al. 2021; Yang et al. 2024)：
+
+1. 快速的**"在线"巩固**（也称为突触巩固（synaptic consolidation））阶段发生在学习之后立即或不久，甚至在清醒状态下。此时新的、最初脆弱的记忆痕迹被稳定化，并开始从短期存储转移到长期存储；
+2. **"离线"巩固**（也称为系统巩固（systems consolidation））过程在海马体（hippocampus）的尖波涟漪（sharp-wave ripples, SWRs）期间——与皮层睡眠纺锤波和慢振荡协调——重复重放近期编码的模式，增强并重组记忆，支持其转移到皮层区域 (Foster et al. 2006; Ji et al. 2007; Peyrache et al. 2009)。
+
+回到顺行性遗忘症的类比，证据表明该疾病可以影响两个阶段，但尤其影响在线巩固阶段，主要原因是海马体是编码新陈述性记忆的门户，因此其损伤意味着新信息永远无法存储到长期记忆中。如上所述，大语言模型的设计，更具体地说是基于 Transformer 的骨干网络，在预训练阶段之后遭受着类似的状况。也就是说，上下文中提供的信息永远不会影响长期记忆参数（如前馈层），因此模型无法获取新知识或技能，除非信息仍存储在短期记忆中（如上下文内或注意力中）。为此，尽管第二阶段对记忆的巩固同等重要甚至更加关键，其缺失可能损害巩固过程并导致记忆丢失 (Drummond et al. 2000; Yoo et al. 2007)，在本文中，我们聚焦于第一阶段：作为在线过程的记忆巩固。如前所述，人类的记忆处理、在线巩固以及持续学习能力已知高度依赖于神经可塑性以及神经振荡（neural oscillations）(Bliss et al. 1993; Buzsaki et al. 2004; Klinzing et al. 2019)。
+
+**多时间尺度处理系统。** 脑波（brainwaves，也称为神经振荡（brain oscillations））——大脑活动中的节律性波动——并非大脑功能的单纯副产品，而是越来越被认为在注意力、记忆和决策等各种认知功能中发挥着关键作用，是组织神经计算、协调脑区间通信以及门控突触可塑性（而突触可塑性是学习和记忆的基础）的核心机制 (Fell et al. 2011; Cavanagh et al. 2014; Fries 2015)。这些脑波是大脑在不同时间尺度和频率更新中协调计算的结果，其中每种频率决定了脑神经元群体变得活跃并共享更新信息的频繁程度。更具体地说，这种神经振荡通常被分为不同的频率类别，每种频率与不同的认知功能相关联，且关键地对应着不同时间尺度的信息处理：从
+
+1. 快速的 **Gamma 波**（频率 30-150 Hz），主要与感觉信息处理相关；到
+2. **Beta 波**（频率 13-30 Hz），主要与主动思维相关 (Buzsaki et al. 2004; Buschman et al. 2007; Lundqvist et al. 2016)；以及
+3. 慢速的 **Delta 波和 Theta 波**（频率 0.5-8 Hz），主要负责记忆巩固和学习 (Marshall et al. 2006; Diekelmann et al. 2010; Ngo et al. 2013; Staresina et al. 2015; Heusser et al. 2016; Daume et al. 2024)。
+
+然而，在深度学习模型中，架构的权重在测试时是固定的，而且在预训练中通常对模型的所有块/层使用相同的更新速率。不过，我们在后续第 6 节中将展示，上下文学习提供了这种设计的一个极端情况，事实上 Transformer 架构基于两种极端的更新频率：即注意力块和 MLP 块分别对应 $\infty$ 和 $0$。
+
+**大脑的统一且可复用结构。** 如前所述，神经可塑性是大脑在面对新记忆、知识甚至损伤时改变自身的卓越能力 (Pascual-Leone et al. 2005; Johnston 2009)。这一特性暗示了一种统一的架构，其中神经元素并非刚性地专用于某一功能，而是可复用的，能够被灵活地重新部署以支持不同的认知需求。神经复用性的一个现实世界案例是大脑半球切除术（hemispherectomy）——通过手术切除或禁用一个大脑半球，通常用于缓解严重癫痫。令人惊叹的是，如果该手术在儿童期进行，患者可以在成年后过上基本正常的生活，拥有高水平的认知功能和完整的神经网络组织，包含典型双半球大脑中所有相同的核心脑网络（用于语言、视觉等的网络）。这一非凡的结果为大脑的统一架构提供了现实证据。也就是说，即使只有半个大脑也能重新分配资源并重组，使得个体能够极好地运作。这些案例，连同个体在缺失部分皮层情况下仍能相对正常生活的记录实例，凸显了大脑统一且可复用的结构。
+
+> **图 2：** 嵌套学习范式将机器学习模型及其训练过程表示为一组嵌套的优化问题。（左）一个混合架构的示例。深度学习视角作为嵌套学习的"展平"图像，无法提供关于各模块计算深度的洞察，而嵌套学习透明地展示了所有内部梯度流。（右）一个神经学习模块：一种学习如何压缩自身上下文流的计算模型。例如，第一层级对应于模型最外层循环的训练，通常称为"预训练"步骤。
+
+此外，大脑统一且可复用结构的这种解读表明，人脑中的记忆并非某些特定区域中的孤立系统，而主要是分布在整个大脑中的。也就是说，与传统记忆模型通常暗示不同类型的记忆驻留在不同的大脑结构中（如短期记忆在前额叶皮层 vs. 长期记忆在海马体和皮层）不同，现代研究支持跨多个脑区分布式神经回路的记忆处理 (Christophel et al. 2017; Kitamura et al. 2017; Roy et al. 2022)。
+
+然而，近年来的现代深度学习架构至少在表面上似乎是异构的，基于以下子集的组合：自注意力变体 (Vaswani et al. 2017)、现代循环神经网络 (Katharopoulos et al. 2020; Schlag et al. 2021; Behrouz et al. 2025c; Peng et al. 2025b)、canon 层 (Allen-Zhu 2025)、全局卷积 (Hasani et al. 2023; Poli et al. 2023) 以及 MLP 块 (Shazeer 2020)。这引发了一个问题：我们是否需要一种新的统一架构，还是我们对当前模型异构性的认识需要被重新审视。
+
+---
+
+### 1.2 贡献与路线图
+
+在本文中，我们旨在提出一种统一的学习范式，该范式不仅为现有的算法、方法和架构提供新的洞察，还揭示了深度学习中层堆叠的新维度——增强模型的计算深度和持续学习能力。在第 2 节中讨论预备概念和背景后，我们将介绍：
+
+**嵌套学习范式（第 3 节）。** 为了回答上述问题，并提供关于克服持续学习、架构设计和现代深度学习模型计算深度方面设计挑战的新洞察，我们提出嵌套学习（NL）——一种学习范式，允许机器学习模型的每个组件在多个层级上对自身上下文拥有内部梯度流，将模型及其学习过程（即优化）表示为一个相互连接的嵌套、多层级和/或并行优化问题系统。我们论证，优化过程与学习算法/架构本质上是相同的概念，只是处于系统的不同层级，具有不同的上下文（即梯度 vs. 标记（tokens））。此外，它们是两个相互连接的组件，其中学习算法/架构为优化器生成上下文（即梯度），这支持了设计架构专用优化器的理念。我们讨论了层级间知识转移的不同方式，从而统一和推广了元学习（meta-learning）、上下文学习、循环神经网络、超网络（hypernetworks）等概念。
+
+**作为学习模块的优化器与架构（第 4、5 节）。** 基于嵌套学习的视角，我们论证，使用反向传播（backpropagation）过程和梯度下降训练深度神经网络是一个压缩和优化问题，其目标是训练一个联想记忆来将各层的输入映射到其对应的预测局部误差。因此，我们论证预训练是上下文学习的一种形式，其中上下文是整个预训练数据，而各层将上下文压缩到其参数中。我们证明这些论点对其他流行的基于梯度的优化器同样成立，它们都是旨在将梯度压缩到其参数中的联想记忆。从嵌套学习的术语来看，基于梯度的优化器如带动量的梯度下降、Adam (Kingma et al. 2014a) 和 AdaGrad (Duchi et al. 2011) 可以分解为两级嵌套优化问题，每级都用简单的梯度下降进行优化。特别地，这一视角清楚地表明，对于压缩梯度而言，在理论上 Adam 是关于逐元素 $L_2$ 回归目标的最优联想记忆。
+
+我们重新审视了之前将架构表示为联想记忆的研究成果 (Behrouz et al. 2025b)，并将其优化过程分解为一组嵌套优化问题，全部用梯度下降进行优化。基于上述发现——即流行的基于梯度的优化器和现代架构都是一组嵌套和/或并行优化问题——我们论证，这两者的结合——即用特定优化器训练架构——也可以表示为一组嵌套和/或并行优化问题。因此，一个**神经学习模块（neural learning module）**（架构及其训练/优化过程的联合系统）是一个统一模型，其中所有元素都是线性或深层 MLP，同时它们在不同层级以不同频率优化各自的内部目标。
+
+基于优化器的联想记忆视角，我们设计了一组新的学习更新（优化步骤），具有更强表达力的记忆结构或在压缩梯度方面更好的记忆管理。特别地，我们论证优化器的选择取决于优化的上下文。一个在压缩梯度方面强大的优化器可能不是压缩标记的最佳选择。为此，我们提出了一种新的梯度下降变体，称为 **Delta 梯度下降（Delta Gradient Descent, DGD）**，其更新不仅取决于当前输入，还取决于神经网络权重的状态，从而在不依赖独立同分布假设的情况下捕获数据样本的依赖关系。
+
+**主要要点与常见术语的重新审视：持续学习与上下文学习、预训练与学习（第 6 节）。** 我们讨论嵌套学习关于基本概念的主要要点，并重新审视一些常见术语：
+
+1. 我们论证持续学习可以被视为在一系列传入上下文或情节上的学习问题，其中不同层级负责压缩各自的上下文内知识并将其传递到更高层级。基于此，我们倡导设计不依赖测试/训练阶段的模型和流程，而是持续管理其知识和记忆；
+2. 上下文学习是"拥有多个嵌套层级"的特性。因此，Transformer 的上下文学习来自于它是对标记上某种回归目标的非参数化解，而现代循环模型在其较低层级中使用参数化学习过程；
+3. 我们进一步重新审视了其他术语，如学习/记忆化、混合架构、循环架构和学习型优化器。
+
+**连续记忆系统、自指涉 Titans 与 Hope（第 7、8 节）。** 我们通过提出**连续记忆系统（Continuum Memory Systems, CMSs）**来推广传统的"长期/短期记忆"（LSM）观点，将记忆视为一个具有频率更新频谱的分布式相互连接系统。在此设计中，高频神经元负责快速适应但仅短期存储记忆/知识，而低频神经元负责更持久的知识。与 LSM 相比，我们展示了这种多频率设计为模型的记忆带来了一个循环过程，这意味着知识在被遗忘时可以部分恢复。虽然我们主要将此记忆系统设计为 Transformer 中 MLP 块的替代品，但我们利用这一直觉设计了**多尺度动量 Muon（Multi-scale Momentum Muon, M3）**优化器——一种具有多个动量项的优化算法——进一步支持了连续记忆系统设计在不同上下文中的重要性。
+
+**实验评估（第 9 节）。** 为了支持我们概念验证的有效性以及嵌套学习设计的重要性，我们在以下方面进行了实验评估：
+
+1. 持续学习和上下文学习任务，包括 (i) 学习新语言，(ii) 类增量学习，以及 (iii) 在新语料上的问答；
+2. 长上下文理解任务，包括大海捞针（needle-in-a-haystack）(Hsieh et al. 2024) 和 BABILong (Kuratov et al. 2024) 基准测试；
+3. 语言建模和常识推理任务；
+4. 上下文内召回和记忆化任务；
+5. 语言识别任务；以及
+6. 不同优化器的比较，包括我们的 M3 优化器。
+
+我们的结果表明，嵌套学习视角在设计具有持续学习能力、多层级计算和自指涉过程的模型方面是有效的。
+## 2 预备知识
+
+本节介绍相关符号约定并回顾背景概念。
+
+**符号约定。** 我们令 $x \in \mathbb{R}^{N \times d_{\text{in}}}$ 为输入，$M_t$ 表示记忆/模型 $M$ 在时刻 $t$ 的状态，$K$ 为键矩阵，$V$ 为值矩阵，$Q$ 为查询矩阵。我们使用带下标 $t$ 的加粗小写字母来指代与输入 $t$ 对应的向量（即 $\boldsymbol{k}_t$、$\boldsymbol{v}_t$ 和 $\boldsymbol{q}_t$）。我们进一步将任意随机变量 $T$ 的分布记为 $p(T)$。在本文中，我们使用具有 $L_M \geq 1$ 层和残差连接的简单多层感知机（MLP）作为记忆模块 $M(\cdot)$ 的架构。需要时，我们将记忆模块参数化为 $\boldsymbol{\theta}_M \supseteq \{W_1, W_2, \ldots, W_{L_M}\}$，其中至少包括 MLP 中线性层的参数。我们使用带括号的上标来指代嵌套学习（Nested Learning）不同层级（不同更新频率）中的参数：即通过层级索引 $W^{(\ell)}$ 或其对应频率 $W^{(f_\ell)}$ 来表示。
+
+**梯度下降（Gradient Descent）。** 梯度下降是高维问题中使用最广泛的优化算法之一，其变体是训练大型模型的标准工具。给定目标函数 $\mathcal{L}(\cdot\,;\cdot)$，步长为 $\eta_t > 0$（即学习率）的随机梯度下降（SGD）通过以下方式更新参数：
+
+$$W_{t+1} = W_t - \eta_t \nabla_{W_t} \mathcal{L}(W_t;\, \boldsymbol{x}_t), \tag{1}$$
+
+其中 $\boldsymbol{x}_t$ 为训练集中的数据样本。梯度下降的公式可以有若干等价表征，这些表征在分析中十分有用。其中一种等价形式是欧几里得度量下的最速下降（steepest descent），其中一步梯度下降等价于：
+
+$$W_{t+1} = \arg\min_{W} \left\langle \nabla_W \mathcal{L}(W_t;\, \boldsymbol{x}_t),\, W \right\rangle + \frac{1}{2\eta_t} \|W - W_t\|_2^2, \tag{2}$$
+
+即最小化一阶 Taylor 近似加上二次近端正则项。上述梯度下降步骤恰好是对 $\mathcal{L}(\cdot\,;\cdot)$ 在 $W_t$ 处线性化的近端更新（proximal update），揭示了其在 $L_2$ 距离上偏好小步移动的隐式偏差（implicit bias）。累积多步更新（使用恒定学习率 $\eta$）可得到跟随正则化领导者（follow-the-regularized-leader, FTRL）形式：
+
+$$W_{t+1} = \arg\min_{W} \left\{ \sum_{s=1}^{t} \left\langle \nabla \mathcal{L}(W_s;\, \boldsymbol{x}_s),\, W \right\rangle + \frac{1}{2\eta} \|W - W_1\|_2^2 \right\}, \tag{3}$$
+
+其解为 $W_{t+1} = W_1 - \eta \sum_{s=1}^{t} \nabla \mathcal{L}(W_s;\, \boldsymbol{x}_s)$。本文中这两种表述可互换使用。然而，我们的讨论和公式对于许多其他优化算法通常也是适用的。
+
+**元学习（Meta Learning）。** 设计一个有效的机器学习模型通常需要对其架构（参数化为 $\boldsymbol{\theta} \in \Theta$）、目标函数 $\mathcal{L}(\theta)$ 以及优化器做出决策，以迭代地优化目标函数。元学习范式（或学会学习，learning to learn）(Schmidhuber et al. 1996; Finn et al. 2017; Akyürek et al. 2022; Irie et al. 2025a) 旨在将此类决策的一部分自动化，将其建模为两层优化过程，其中外层模型旨在学习为内层过程设置参数，以最大化在一组任务上的性能。即，给定一个由参数 $\Phi$ 参数化的目标函数 $\ell(\boldsymbol{\theta}, D;\, \Phi)$，可以将外层循环过程形式化为在一组任务上优化参数 $\Phi$：
+
+$$\Phi^* = \arg\min_{\Phi} \mathbb{E}_{T_i \sim p(T)} \left[ \ell(\theta, T_i;\, \Phi) \right], \tag{4}$$
+
+其中 $p(T)$ 为任务分布。虽然早期的元学习研究在外层循环中使用有监督设置 (Schmidhuber et al. 1996)，但近年来，使用无监督过程作为外层循环的更灵活方法族日益流行 (Finn et al. 2017; Brown et al. 2020; Akyürek et al. 2022; Chen et al. 2022; Qu et al. 2025)。除了将元学习方法应用于多种下游任务的兴趣日益增长 (Finn et al. 2017; Munkhdalai et al. 2019; Chen et al. 2022; Irie et al. 2025a; Qu et al. 2025) 之外，近年来元学习作为设计强大序列模型的范式也获得了广泛关注 (Sun et al. 2024; Behrouz et al. 2025b,c)。
+
+**快速权重编程器（Fast Weight Programmers, FWPs）。** 快速权重编程器（近年来也被称为线性 Transformer）(Hinton et al. 1987; Schmidhuber 1992; Ba et al. 2016; Schlag et al. 2021)，同样受到神经科学视角的启发 (Gershman et al. 2025)，是一类记忆（或隐藏状态）为矩阵值的循环神经网络：一个随时间变化的快速权重矩阵 $M_t \in \mathbb{R}^{d_{\text{out}} \times d_{\text{key}}}$ 充当短期记忆。一个独立的"编程器"（慢网络）将每个输入 $\boldsymbol{x}_t \in \mathbb{R}^{d_{\text{in}}}$ 映射为查询、键和值向量，并在线更新快速权重。一个基本的（Hebb学习规则/外积）FWP——通常称为基础 FWP（vanilla FWP）——通过以下方式更新其参数：
+
+$$M_t = \alpha_t M_{t-1} + \boldsymbol{v}_t \phi(\boldsymbol{k}_t)^\top, \tag{5}$$
+
+并通过 $y_t = M_t \phi(q_t)$ 从记忆中检索，其中 $\phi(\cdot)$ 是逐元素的特征映射（通常同时应用于键和查询）。与传统 RNN 或早期变体的现代 RNN (Schmidhuber et al. 1997; Sun et al. 2023; Botev et al. 2024) 的向量状态不同，矩阵 $M_t$ 是循环状态；它通过秩一更新写入，通过矩阵-向量乘法读取，提供了一种紧凑的、可学习的键值记忆，其状态大小在时间上保持恒定。
+
+**上下文学习（In-context Learning）。** "上下文学习"的概念最初由 Brown et al. (2020) 定义为语言模型利用预训练期间获得的知识来推断和执行新任务的能力，仅基于其上下文（例如少量示例或自然语言指令）。这一广泛而通用的定义——本质上适用于任何架构骨干和/或目标函数的任何语言模型——后来被形式化为仅描述基于 Transformer 架构并使用下一词预测目标训练的上下文学习。因此，尽管关于基于 Transformer 模型能够在上下文中学习的算法/问题已有大量研究 (Akyürek et al. 2022, 2024b; Zhang et al. 2024a; Dherin et al. 2025)，上下文学习的一般形式仍相对未被充分探索。在本文中，我们使用"上下文学习"最通用的定义，将其定义为模型自适应于给定上下文并从中学习的能力。我们的嵌套学习（NL）公式将上下文学习与联想记忆的概念相连接，为模型的上下文学习能力提供了统一的解释，而不依赖于其架构骨干和/或目标函数。
+
+---
+
+## 3 嵌套学习（Nested Learning）
+
+本节讨论嵌套学习（NL）的动机、形式化定义及其一般性的高层含义。我们从联想记忆的公式化开始，然后通过逐步的示例建立对架构分解（architecture decomposition）及其与将神经网络建模为优化问题集成系统之间联系的直觉。我们首先展示深度学习中现有方法和概念如何属于嵌套学习范式，然后提出超越传统方法的新公式，和/或提供关于如何改进现有算法和设计的洞见。
+
+### 3.1 联想记忆（Associative Memory）
+
+联想记忆——在事件之间形成和检索关联的能力——是一种基本的心理过程，也是人类学习不可分割的组成部分 (Terry 2017)。在文献中，记忆（memorization）和学习（learning）的概念常被互换使用；然而在神经心理学文献中，这两者有着明确的区分。更具体地说，沿用神经心理学文献 (Okano et al. 2000)，我们基于以下对记忆和学习的定义建立术语体系：
+
+> **学习与记忆：**
+> 记忆是由输入引起的神经更新，而学习是获取有效且有用记忆的过程。
+
+在本工作中，我们的目标首先是展示计算序列模型的所有元素——包括优化器和神经网络——都是压缩自身上下文流（context flow）的联想记忆系统。广义而言，联想记忆是将一组键映射到一组值的算子。我们遵循 Behrouz et al. (2025b) 对联想记忆的一般定义：
+
+> **Definition 1（联想记忆）。** 给定一组键 $K \subseteq \mathbb{R}^{d_k}$ 和值 $V \subseteq \mathbb{R}^{d_v}$，联想记忆是一个算子 $M(\cdot)$，将键集合 $K$ 映射到值集合 $V$。为了从数据中学习这种映射，目标函数 $\tilde{\mathcal{L}}(\cdot\,;\cdot)$ 衡量映射的质量，$M$ 可以通过以下方式计算：
+>
+> $$M^* = \arg\min_{M} \tilde{\mathcal{L}}(M(K);\, V). \tag{6}$$
+
+虽然算子本身是一个记忆，映射过程充当记忆化过程（即记忆上下文中事件之间的关联），但基于数据获取这种有效算子则是一个学习过程。注意，这里的键和值可以是记忆旨在映射的任意事件，并不限于词元（token）。后文我们将讨论，给定一个上下文流，键和值可以是词元、梯度、子序列等。此外，虽然联想记忆一词在神经科学和神经心理学文献中更为常见，但上述公式也与数据压缩和低维表示密切相关。即，人们可以将公式 6 中的优化过程解释为训练网络 $M(\cdot)$ 的过程，该网络旨在将映射压缩到其参数中，在低维空间中表示它们。
+
+在序列建模中，当键和值为输入词元（例如分词后的文本）时，目标函数的选择和求解公式 6 的优化过程可以产生不同的序列建模架构（参见 Liu et al. 2024b 和 Behrouz et al. 2025b），例如全局/局部 softmax 注意力 (Vaswani et al. 2017) 或其他现代循环模型 (Katharopoulos et al. 2020; Sun et al. 2023; Behrouz et al. 2025c)。序列模型的这一简洁公式使我们能够更好地理解其内部过程，也提供了一个工具，可以基于其目标函数和优化过程简单地比较它们的建模能力。下文中，我们通过逐步示例讨论这一公式如何应用于神经架构的所有组件（包括其预训练中的优化过程），以及事实上，一个模型如何是一个由多层级、嵌套、可能并行的记忆组成的集成系统，每个记忆都有其自身的上下文流。
+
+### MLP 训练的简单示例
+
+我们从一个简单示例开始，目标是在任务 $T$ 和数据集 $D_{\text{train}} = \{x_1, \ldots, \boldsymbol{x}_{|D_{\text{train}}|}\}$ 上通过梯度下降优化目标函数 $\mathcal{L}(\cdot\,;\cdot)$ 来训练一个单层 MLP（参数化为 $W$）。在这种情况下，训练过程的目标是求解以下优化问题：
+
+$$W^* = \arg\min_{W} \mathcal{L}(W;\, D_{\text{train}}), \tag{7}$$
+
+通过（随机/在线）梯度下降优化得到权重更新规则：
+
+$$W_{t+1} = W_t - \eta_{t+1} \nabla_W \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1}) = W_t - \eta_{t+1} \underbrace{\nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})}_{\text{输出中的惊异度}} \otimes \underbrace{\boldsymbol{x}_{t+1}}_{\text{惊异度}}, \tag{8}$$
+
+其中 $\boldsymbol{x}_{t+1} \sim D_{\text{train}}$，$y_{t+1} = W x_{t+1}$ 是模型对输入 $x_{t+1}$ 的输出，并且我们使用了简化记号：$\nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1}) := \frac{\partial \mathcal{L}}{\partial y}\big|_{y=Wx_{t+1}}$。在这种情况下，$\nabla_W \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})$ 是惊异度度量（surprise metric），表明当前输入与先前观察到的数据有多大差异。类似地，$\nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})$ 是输出的惊异度度量（或更准确地说，是表示空间中的局部惊异信号，量化当前输出与目标函数 $\mathcal{L}(\cdot\,;\cdot)$ 所施加结构之间的不匹配程度）——衡量模型的预测对于该输入有多令人惊异。基于这一公式，可以令输出的惊异值为 $u_{t+1} = \nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})$，并将反向传播过程重新表述为一个优化问题的解——寻找一个联想记忆，将输入数据点 $D_{\text{train}} = \{x_t\}_{t=1}^{|D_{\text{train}}|}$ 映射到其对应的 $u_{t+1} = \nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})$。即，我们令 $M(\cdot) = W_t \cdot$ 参数化记忆，并使用点积相似度来衡量 $W_t$ 在 $x_{t+1}$ 和 $\nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})$ 之间映射的质量：
+
+$$W_{t+1} = \arg\min_{W} \left\langle W \boldsymbol{x}_{t+1},\, u_{t+1} \right\rangle + \frac{1}{2\eta_{t+1}} \|W - W_t\|_2^2 = \arg\min_{W} \left\langle W \boldsymbol{x}_t,\, \nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1}) \right\rangle + \frac{1}{2\eta_{t+1}} \|W - W_t\|_2^2. \tag{9}$$
+
+因此，这一公式将模型的训练阶段转化为获取有效记忆的过程，该记忆将数据样本映射到其在表示空间中的局部惊异信号（Local Surprise Signal, LSS）——衡量其对应输出有多令人惊异。这个梯度可以被视为预测中的误差（当损失被最小化时梯度为零）。后文第 4 节将更详细地讨论反向传播过程作为联想记忆，但作为这个简单示例的初步要点：
+
+> **用反向传播训练线性层作为基于惊异度的记忆：**
+> 通过反向传播训练的线性层通过记忆其预测输出的惊异程度来从数据中学习；即，反向传播可以被视为一种联想记忆，将每个数据样本映射到其对应预测的误差。
+
+因此，在这个示例中，我们的模型在数据样本上有一个单一的梯度流，它仅在数据集 $D_{\text{train}} = \{x_1, \ldots, \boldsymbol{x}_{|D_{\text{train}}|}\}$ 上活跃，并在之后对任何其他数据样本（即推理或测试时）都将被冻结。
+
+在上述示例中，我们可以将梯度下降算法替换为其带动量的变体，得到更新规则：
+
+$$W_{t+1} = W_t - \boldsymbol{m}_{t+1}, \tag{10}$$
+
+$$\boldsymbol{m}_{t+1} = \boldsymbol{m}_t + \eta_{t+1} \nabla_W \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1}) = \boldsymbol{m}_t + \eta_{t+1} \nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1}) \otimes \boldsymbol{x}_{t+1}. \tag{11}$$
+
+在公式 11 中，给定公式 10 的前一状态（在时刻 $t$），$\nabla_W \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})$ 或类似地 $\nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})$ 的值不依赖于公式 11 中递推的输出，因此可以预先计算：令 $u_{t+1} = \nabla_W \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1})$，公式 11 可以重新表述为：
+
+$$W_{t+1} = W_t - \boldsymbol{m}_{t+1}, \tag{12}$$
+
+$$\boldsymbol{m}_{t+1} = \arg\min_{\boldsymbol{m}} -\left\langle \boldsymbol{m},\, \nabla_{W_t} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1}) \right\rangle + \frac{1}{2\eta_{t+1}} \|\boldsymbol{m} - \boldsymbol{m}_t\|_2^2 = \arg\min_{\boldsymbol{m}} -\left\langle \boldsymbol{m}\, \boldsymbol{x}_{t+1},\, \nabla_{y_{t+1}} \mathcal{L}(W_t;\, \boldsymbol{x}_{t+1}) \right\rangle + \frac{1}{2\eta_{t+1}} \|\boldsymbol{m} - \boldsymbol{m}_t\|_2^2. \tag{13}$$
+
+基于这一公式，可以将动量项解释为：(1) 一个无值的联想记忆，将梯度压缩到其参数中；或 (2) 一个联想记忆，学习如何将数据点映射到其对应的局部惊异信号值。有趣的是，这一公式揭示了带动量的梯度下降可以被视为一个两层优化过程，其中记忆通过简单梯度下降算法进行优化$^1$。
+
+总结以上示例，我们观察到，使用以下方法训练单层 MLP 的过程：(1) 梯度下降是一个单层联想记忆，学习如何将数据点映射到其对应的局部惊异信号值；(2) 带动量的梯度下降是一个两层联想记忆（或优化过程），内层学习将梯度值存储到其参数中，然后外层使用内层记忆的值更新慢权重（即 $W_t$）。虽然这些是关于架构和优化算法的最简单示例，但人们可能会问，在更复杂的设置中是否也能得出类似的结论。
+
+$^1$ 我们使用"两层"或"多层"一词来描述优化过程。这不同于经典的多层优化，后者中优化问题是分层排列的。
+
+### 架构分解示例
+
+在下一个示例中，我们将前一个示例中的 MLP 模块替换为线性注意力（linear attention）(Katharopoulos et al. 2020)。即，我们的目标是在任务 $T$ 和序列 $D_{\text{train}} = \{x_1, \ldots, \boldsymbol{x}_{|D_{\text{train}}|}\}$ 上通过梯度下降优化目标函数 $\mathcal{L}$ 来训练一个单层线性注意力。回顾非归一化线性注意力的公式：
+
+$$\boldsymbol{k}_t = W_{\boldsymbol{k}} \boldsymbol{x}_t, \qquad \boldsymbol{v}_t = W_{\boldsymbol{v}} \boldsymbol{x}_t, \qquad \boldsymbol{q}_t = W_{\boldsymbol{q}} \boldsymbol{x}_t, \tag{14}$$
+
+$$M_t = M_{t-1} + \boldsymbol{v}_t \boldsymbol{k}_t^\top, \tag{15}$$
+
+$$y_t = M_t \boldsymbol{q}_t. \tag{16}$$
+
+如先前研究所讨论的 (Liu et al. 2024b; Behrouz et al. 2025b)，公式 15 中的递推可以重新表述为矩阵值联想记忆 $M_t(\cdot)$ 的优化过程，将键和值的映射压缩到其参数中。具体而言，在 Definition 1 中，如果我们令 $\tilde{\mathcal{L}}(M_{t-1};\, \boldsymbol{k}_t, \boldsymbol{v}_t) := -\langle M_{t-1} \boldsymbol{k}_t,\, \boldsymbol{v}_t \rangle$ 并旨在通过梯度下降优化记忆，则记忆更新规则为：（注意 $\nabla \tilde{\mathcal{L}}(M_{t-1};\, \boldsymbol{k}_t, \boldsymbol{v}_t) = -\boldsymbol{v}_t \boldsymbol{k}_t^\top$，且令学习率 $\eta_t = 1$）
+
+$$M_{t+1} = \arg\min_{M} -\langle M \boldsymbol{k}_{t+1},\, \boldsymbol{v}_{t+1} \rangle + \frac{1}{2} \|M - M_t\|_2^2 \tag{17}$$
+
+$$\Rightarrow\quad M_{t+1} = M_t - \nabla \tilde{\mathcal{L}}(M_t;\, \boldsymbol{k}_{t+1}, \boldsymbol{v}_{t+1}) = M_t + \boldsymbol{v}_{t+1} \boldsymbol{k}_{t+1}^\top, \tag{18}$$
+
+这等价于公式 15 中非归一化线性注意力的更新规则。同样，如我们在第一个示例中所观察到的，用梯度下降训练线性层可以被视为联想记忆的单层优化（公式 8），因此投影层（即 $W_{\boldsymbol{k}}, W_{\boldsymbol{v}}$ 和 $W_{\boldsymbol{q}}$）的一般训练/更新过程本身就是联想记忆的优化过程。因此，用梯度下降训练线性注意力可以被看作一个两层优化过程，其中外层循环（也称为训练过程）用梯度下降优化投影层，而内层循环用梯度下降优化 $M_t$ 的内部记忆。
+
+在我们迄今讨论的示例中，有两个联想记忆，每个都有自己的优化过程和梯度流。即，在优化外层参数 $W_{\boldsymbol{k}}, W_{\boldsymbol{v}}$ 和 $W_{\boldsymbol{q}}$ 时，不存在关于参数 $M(\cdot)$ 的梯度，因此不存在通过它的反向传播。类似地，在内层中，不存在通过投影层的反向传播，它们被视为冻结的。此外，值得注意的是，在这个示例中，上述公式也与线性注意力的快速权重编程器视角密切相关 (Schlag et al. 2021)，其中投影层被视为慢权重，公式 15 中的记忆更新则是快速权重更新规则。
+
+> **图 3：** 在基于 Transformer 的骨干网络中，比较前馈网络（FFN，如 MLP）与线性注意力的示例，使用梯度下降优化。红色组件是第一层级的模块（频率为 1），蓝色组件是第二层级的模块（频率为 $L$）。具有可学习初始记忆状态的线性注意力（称为 Linear Attention++）与 MLP 层相同，但具有上下文学习能力和对输入序列的自适应能力。
+
+### 更多层级的架构分解
+
+在上述两个示例中，我们讨论了如何将它们视为两层优化过程（与其快速权重编程器解释一致）。然而在实践中，我们可能需要使用更强大的优化过程和/或更强大的记忆循环更新规则。作为一个简单示例，假设我们使用带动量的梯度下降来训练线性注意力模型。如上所述，线性注意力组件可以分解为两个嵌套的优化过程。类似地，这里的模型可以表示为一个两层优化问题，其中 (1) 内层使用梯度下降优化记忆以压缩上下文（公式 17），(2) 外层使用带动量的梯度下降优化投影层。有趣的是，我们已经看到"带动量的梯度下降"算法本身可以被视为一个两层优化过程，其中动量项本身就是一个将过去梯度压缩到其参数中的联想记忆。
+
+### 3.2 嵌套优化过程（Nested Optimization Processes）
+
+在前一节中，我们提供了示例来演示如何将机器学习模型分解为一组嵌套或多层级优化过程。接下来，我们首先对嵌套学习问题进行形式化，然后定义神经学习模块（Neural Learning Module）——一个从数据中学习的集成计算系统。
+
+在前面的章节中，我们将模型分解为一组优化过程。然而，是否可以在这些过程上定义一个层次结构（或次序），并以这种格式唯一地表示模型，这一点仍不清楚。受脑波层次结构——指示每个部分信息处理频率——的启发（在第 1 节中讨论），我们使用每个优化过程的更新速率来将各组件排序到多个层级中。为此，我们将对一个数据点的一次更新步骤作为时间单位，并定义每个组件的更新频率为：
+
+> **Definition 2（更新频率）。** 对于任何组件 $A$，它可以是参数化组件（例如，带动量梯度下降中的可学习权重或动量项）或非参数化组件（例如，注意力模块），我们定义其频率（记为 $f_A$）为其每单位时间的更新次数。
+
+给定上述更新频率，我们可以基于算子 $(\cdot \succ \cdot)$ 对机器学习算法的组件进行排序。我们说 $A$ 比 $B$ 更快，记为 $A \succ B$，如果：(1) $f_A > f_B$，或 (2) $f_A = f_B$ 但在时刻 $t$ 计算 $B$ 的状态需要先计算 $A$ 在时刻 $t$ 的状态。在这个定义中，当 $A \not\succ B$ 且 $B \not\succ A$ 时，我们令 $A \stackrel{f}{=} B$，这表明 $A$ 和 $B$ 具有相同的更新频率，但它们的计算彼此独立（后文我们在 AdamW 优化器中提供了这种情况的示例）。基于上述算子，我们将各组件排序为一个有序的"层级"集合，其中 (1) 同一层级中的组件具有相同的更新频率，(2) 层级越高，其频率越低。基于上述层级和更新频率的公式，我们接下来正式定义嵌套学习：
+
+> **Definition 3（嵌套系统）。** 一个（有序的）嵌套系统是一个具有 $K$ 个（有序）层级的系统，每个层级 $k$（$1 \leq k \leq K$）由一组优化问题 $\{(\mathcal{L}_i^{(k)}, C_i^{(k)}, \boldsymbol{\Theta}_i^{(k)})\}_{i=1}^{N_k}$ 组成，其中 $\mathcal{L}_i(\cdot\,;\cdot)$ 是第 $i$ 个问题的优化目标，$C_i$ 是其上下文（被优化的数据），$\boldsymbol{\Theta}_i$ 是其参数的可行集，每个参数使用梯度下降进行优化：
+>
+> $$\boldsymbol{\theta}_{i\,t+1}^{(k)} = \arg\min_{\boldsymbol{\Phi}_i^{(k)}} \left\langle \boldsymbol{\Phi}_i^{(k)} \boldsymbol{x}_{t+1},\, -\nabla \mathcal{L}_i^{(k)}(\boldsymbol{\theta}_{i\,t}^{(k)};\, \boldsymbol{x}_{t+1}) \right\rangle + \frac{1}{2\eta_{i\,t+1}^{(k)}} \|\boldsymbol{\Phi}_i^{(k)} - \boldsymbol{\theta}_{i\,t}^{(k)}\|_2^2, \tag{19}$$
+>
+> 其中 $\boldsymbol{x}_{t+1} \sim C_i^{(k)}$，且 $\boldsymbol{\Phi}_i^{(k)} \in \boldsymbol{\Theta}_i^{(k)}$。
+
+注意，每个优化过程都有其自身的梯度流，因此有时我们将其称为与优化问题对应的梯度流盒子（box）。在本文中，我们进一步推广嵌套系统的定义，允许某些盒子（即优化问题）寻找非参数化的解。
+
+上述定义为嵌套系统提供了一个通用灵活的定义，未指定不同盒子之间是否存在依赖关系（即一个盒子可以决定另一个盒子的上下文或参数空间）。在接下来的章节中，我们将讨论知识/信息如何在不同层级或盒子之间传递。在本文中，我们专注于联想记忆的嵌套系统（Nested Systems of Associative Memories, NSAM），即每个优化过程都是一个联想记忆的嵌套系统。更正式地说，
+
+> **Definition 4（联想记忆的嵌套系统）。** 联想记忆的嵌套系统（NSAM）是一个具有 $K$ 个（有序）层级的系统，每个层级 $k$（$1 \leq k \leq K$）由一组优化问题 $\{(\mathcal{L}_i^{(k)}, C_i^{(k)}, \boldsymbol{\Theta}_i^{(k)})\}_{i=1}^{N_k}$ 组成，其中 $C_i = \{(\boldsymbol{k}_j^{(i)}, \boldsymbol{v}_j^{(i)})\}_{j=1}^{L_i}$ 是一组键值对，$\mathcal{L}_i(\cdot\,;\cdot,\cdot)$ 衡量第 $i$ 个问题中记忆所学映射的质量，$\boldsymbol{\Theta}_i$ 是可行记忆参数集，每个参数使用梯度下降进行优化：
+>
+> $$\boldsymbol{\theta}_{i\,t+1}^{(k)} = \arg\min_{\boldsymbol{\Phi}_i^{(k)}} \left\langle \boldsymbol{\Phi}_i^{(k)} \boldsymbol{k}_{t+1}^{(i)},\, -\nabla \mathcal{L}_i^{(k)}(\boldsymbol{\theta}_{i\,t}^{(k)};\, \boldsymbol{k}_{t+1}^{(i)}, \boldsymbol{v}_{t+1}^{(i)}) \right\rangle + \frac{1}{2\eta_{i\,t+1}^{(k)}} \|\boldsymbol{\Phi}_i^{(k)} - \boldsymbol{\theta}_{i\,t}^{(k)}\|_2^2, \tag{20}$$
+>
+> 其中 $(\boldsymbol{k}_{t+1}^{(i)}, \boldsymbol{v}_{t+1}^{(i)}) \sim C_i^{(k)}$，且 $\boldsymbol{\Phi}_i^{(k)} \in \boldsymbol{\Theta}_i^{(k)}$。
+
+给定查询 $\boldsymbol{q}$，对于每个联想记忆 $M_i^{(k)}$，我们用 $M_i^{(k)}(\boldsymbol{q})$ 来指代记忆的前向传播过程（即检索过程）。虽然我们的 NSAM 公式可以简单地通过梯度下降以外的任何优化过程来定义，并且最初看来梯度下降优化的严格条件可能会限制定义的建模能力，但在本文中我们将展示现代架构以及某些著名的优化算法可以被视为 NSAM 的实例。然后我们在此直觉的基础上讨论如何通过堆叠多个层级来进一步推进，并设计具有增强持续学习能力的模型。
+
+堆叠多个层级这一新维度是嵌套学习的重要特征，其中计算深度可以通过增加层级数量来增强。根据设计、上下文和知识迁移的类型，这种计算深度本身可以被视为不同的概念，例如：更高阶的上下文学习能力、隐式计算（latent computation，例如循环 Transformer）、多记忆系统以及更具表达力的优化器。后文我们将讨论所有这些含义，但接下来我们用一个简单示例来连接 Transformer 架构中的 MLP 层与线性或深度记忆模块。
+
+### MLP 层与线性注意力的比较示例
+
+让我们比较两个模型：(1) 一个 Transformer 架构，(2) 相同的骨干网络但将 MLP 模块替换为线性注意力机制（与前一层共享键和值），其中记忆的初始状态是元学习得到的（类似于 Behrouz et al. (2025c) 或 Sun et al. (2024)）。我们将第二个变体称为自适应 Transformer（Adaptive Transformer）或 AdaTransformer。两个模型都使用梯度下降在下一词预测（Next Token Prediction, NTP）目标上进行优化。如初始示例中所讨论的，也如图 3 所示，两个模型都有两个层级，为了清晰起见，我们用红色（分别为蓝色）标注第一层级（分别为第二层级）的计算/权重。更正式地，令 $X = \{x_i\}_{i=1}^{T}$ 为输入词元序列，两个模块的输出计算如下（为简化起见，我们假设 $\text{MLP}(\cdot) = \cdot\, W_{\text{MLP}}$，并省略归一化）：
+
+**Transformer 模块：**
+
+$$\boldsymbol{k}_t = \boldsymbol{x}_t W_{\boldsymbol{k}}, \qquad \boldsymbol{v}_t = \boldsymbol{x}_t W_{\boldsymbol{v}}, \qquad \boldsymbol{q}_t = \boldsymbol{x}_t W_{\boldsymbol{q}},$$
+
+$$\boldsymbol{y}_{\text{attn}} = \text{Attn}(\boldsymbol{k}, \boldsymbol{v}, \boldsymbol{q}),$$
+
+$$\boldsymbol{y}_{\text{block}} = \text{MLP}(\boldsymbol{y}_{\text{attn}}) = \boldsymbol{y}_{\text{attn}} W_{\text{MLP}}.$$
+
+**AdaTransformer 模块：**
+
+$$\boldsymbol{k}_t = \boldsymbol{x}_t W_{\boldsymbol{k}}, \qquad \boldsymbol{v}_t = \boldsymbol{x}_t W_{\boldsymbol{v}}, \qquad \boldsymbol{q}_t = \boldsymbol{x}_t W_{\boldsymbol{q}},$$
+
+$$\boldsymbol{y}_{\text{attn}} = \text{Attn}(\boldsymbol{k}, \boldsymbol{v}, \boldsymbol{q}),$$
+
+$$\boldsymbol{y}_{\text{block}} = \boldsymbol{y}_{\text{attn}} W_{\text{LinAttn}}.$$
+
+两个模块的公式看起来非常相似，唯一的区别在于 $W_{\text{MLP}}$ 和 $W_{\text{LinAttn}}$ 权重所处的层级。即，$W_{\text{MLP}}$ 处于第一层级因此相对于上下文是持久的（persistent），而 $W_{\text{LinAttn}}$ 是自适应的，在上下文中通过以下方式更新（$M(\cdot)$ 由 $W_{\text{LinAttn}}$ 参数化）：
+
+$$M_t = M_{t-1} + \boldsymbol{v}_t \boldsymbol{k}_t^\top. \tag{21}$$
+
+在线性注意力的早期变体中，$M(\cdot)$ 或等价地 $W_{\text{LinAttn}}$ 的初始状态被设为零矩阵，$M_0 = 0$。然而，与更先进的设计选择类似 (Sun et al. 2024; Behrouz et al. 2025c)，这个初始状态可以通过元学习来快速适应上下文。在这种设置中，$M_0 = W_{\text{LinAttn}}^{\text{init}}$ 的初始状态在第一层级用 NTP 目标进行优化，而给定上下文后，$W_{\text{LinAttn}}$ 在第二层级作为联想记忆用点积目标进行优化 (Behrouz et al. 2025b)。
+
+上述示例在使用 Transformer 架构中更先进的深度 MLP 模块（如 SwiGLU (Shazeer 2020)）并与其循环记忆对应版本 (Behrouz et al. 2025a) 进行比较时同样成立。此外，这个简单示例暗示，当前将混合架构视为富有表达力的 softmax 注意力与高效循环模型组合的观点在某种程度上是具有误导性的，它遵循了传统的 Transformer 骨干设计但为 MLP 模块增添了额外的上下文学习能力。我们将在第 6 节和第 7 节进一步讨论这一点。作为本小节关于嵌套系统和嵌套学习概念讨论的要点：
+
+> **嵌套学习中的层级堆叠：**
+> 嵌套学习允许由多个（多层）层级组成的计算模型以不同的抽象层次和更新频率从数据中学习和处理数据。
+
+### 神经学习模块是相互连接的系统
+
+如前所述，在文献中将架构与其优化过程分开处理并将它们视为独立的设计选择是很常见的，其目的是在每个方面组合具有最大表达能力的算法。然而在实践中，用随机梯度下降优化的 Transformer 架构 (Vaswani et al. 2017) 可能学到与使用 Adam 优化器 (Kingma et al. 2014a) 时非常不同的解。因此，当我们与这些机器学习算法交互时，我们观察到尽管在架构维度上具有相似性，整体训练后的模型却显示出不同的预测或生成不同的输出。然而，从嵌套学习的视角来看，机器学习算法被表示为优化问题的互连系统，模型的行为、预测和输出生成取决于这个系统整体，而不一定取决于其各个子组件。为此，我们定义神经学习模块（Neural Learning Module）一词来指代模型的这种表示，其中架构和优化过程共同决定模型及其输出。虽然这种联合表示在当前的机器学习流程中——存在训练阶段然后是测试阶段——可能看起来并不显著，但在我们所倡导的持续学习（continual）设置中变得更加重要，在该设置中没有训练/测试阶段的区分（更多讨论参见第 8 节）。
+
+基于神经学习模块的定义，一个重要问题是架构和优化过程如何作为互连系统以及它们如何相互影响。回顾训练神经网络的一般公式：给定任务 $T$、其对应的数据分布 $p(T)$、由 $\Phi_T$ 参数化的模型 $f(\cdot\,;\cdot)$ 以及目标函数 $\mathcal{L}(\cdot\,;\cdot)$，我们的目标是学习参数 $\Phi_T^*$ 使得：
+
+$$\Phi_T^* = \arg\min_{\Phi} \mathbb{E}_{\boldsymbol{x},\boldsymbol{y} \sim p(T)} \left[ \mathcal{L}(\Phi;\, \boldsymbol{x}, \boldsymbol{y}) \right]. \tag{22}$$
+
+在实践中，我们基于给定的数据集 $D_{\text{train}}$ 和诸如随机梯度下降的优化算法来优化上述问题：
+
+$$\Phi_{t+1} = \Phi_t - \eta_{t+1} \nabla_{\Phi_t} \mathcal{L}(\Phi_t;\, \boldsymbol{x}_{t+1}, \boldsymbol{y}_{t+1}), \qquad \text{其中 } (\boldsymbol{x}_{t+1}, \boldsymbol{y}_{t+1}) \sim D_{\text{train}}. \tag{23}$$
+
+对公式 23 中模型 $f(\cdot\,;\cdot)$ 优化过程的一种解释是将模型视为公式 23 中优化过程的数据生成器。即，如第 3.1 节第一个示例所讨论的，以及后文第 4 节将展示的，优化过程是一个联想记忆，旨在压缩训练数据与其梯度（或惊异度）之间的模式，因此用于内部训练这种记忆的数据集（即模型的梯度）是由模型生成的。因此，模型的类型可以导致生成具有不同模式和随时间变化的不同分布的数据集（即梯度）。优化过程和这种数据生成的效果也反馈到模型本身，其中模型中参数的下一状态由优化算法决定。正如我们将在第 4 节讨论的，将优化器视为模型梯度上的联想记忆意味着每个优化器都有一些特殊特性，如更好的记忆管理、更高的压缩率等。因此，选择这些算法需要理解生成的梯度以及模型在参数空间中的变化。
+
+### 3.3 层级间的知识迁移（Knowledge Transfer Between Levels）
+
+到目前为止，我们主要关注嵌套学习的概念以及优化问题如何位于不同层级中。然而，嵌套优化问题（在不同层级中）如何相互影响，或者更一般地说它们如何对系统的输出做出贡献从而相互连接，这一点仍不清楚。在本节中，我们讨论不同层级组件之间的几种潜在知识迁移方法。为了清晰起见，我们讨论两个层级和模块之间的知识迁移，即 $B^{(0)} = (\mathcal{L}^{(0)}, C^{(0)}, \boldsymbol{\Theta}^{(0)})$ 和 $B^{(1)} = (\mathcal{L}^{(1)}, C^{(1)}, \boldsymbol{\Theta}^{(1)})$，以及对应的记忆 $M^{(0)}(\cdot)$ 和 $M^{(1)}(\cdot)$：
+
+### 层级的直接连接（参数化方式）
+
+第一种知识迁移类型是直接整合不同层级或模块中的权重。为此，低频率（即高层级）记忆系统的前向传播或检索过程也以高频率（即低层级）记忆的参数为条件：
+
+$$M^{(0)}(\cdot) := M^{(0)}(\cdot\,;\, \boldsymbol{\Theta}^{(1)}). \tag{24}$$
+
+在一个更具体的公式中，作为上述公式的特殊变体，我们可以基于高频率记忆的输出（或前向传播）来对 $M^{(0)}(\cdot)$ 的输出进行条件化：
+
+$$M^{(0)}(\cdot) := M^{(0)}(\cdot\,;\, M^{(1)}(\cdot)), \tag{25}$$
+
+其中我们略微滥用了符号，隐藏了对第二个参数的依赖。作为这种知识迁移类型的一个示例，在线性 Transformer（或 FWP）(Katharopoulos et al. 2020; Schlag et al. 2021) 中，当初始记忆状态为零时，低层级（快速权重）中存储的知识直接影响模型在另一层级中的输出。即，可以将前向传播（记忆检索）重写为：
+
+$$\boldsymbol{y}_t = \underbrace{M_t}_{\substack{\text{高频率记忆的} \\ \text{前向传播}}} \underbrace{\boldsymbol{x}_t W_q}_{\substack{\text{低频率记忆的} \\ \text{前向传播}}} \tag{26}$$
+
+### 层级的直接连接（非参数化方式）
+
+层级之间直接连接的另一种形式是上述公式的非参数化变体，其中模块 $B^{(1)}$ 通过寻找非参数化解来优化。因此，低频率记忆的前向传播以高频率记忆的上下文和输出为条件：
+
+$$M^{(0)}(\cdot) := M^{(0)}(\cdot\,;\, C^{(1)}), \qquad \text{或类似地，} \qquad M^{(0)}(\cdot) := M^{(0)}(\cdot\,;\, M^{(1)}(\cdot;\, C^{(1)})). \tag{27}$$
+
+作为这一变体的示例，可以参考 Transformer 和 softmax 注意力模块 (Vaswani et al. 2017)。上述两种变体都有一个重要特征：在两个不同层级的模块的任何状态之间不存在反向传播，知识通过直接将一个层级的输出/参数作为另一个层级输出的条件来传递。因此，在这个过程中，每个模块的状态被视为另一个模块的超参数。
+
+### 通过反向传播的知识迁移
+
+另一种知识迁移形式是通过反向传播，即不同层级的模块之间存在梯度流。这种设计的前向传播与上面讨论的前向传播相同。然而，反向传播是主要区别，在上述两种情况中每个联想记忆的状态被视为另一个的超参数，但在这里两个状态在同一梯度流中被优化。因此，对于两个层级中两个模块的简单情况，我们有：
+
+$$\begin{cases} M^{(0)}(\cdot) := M^{(0)}(\cdot\,;\, M^{(1)}(\cdot)) & \text{（前向传播）} \\[6pt] \boldsymbol{\Theta}_{t+1}^{(1)} = \boldsymbol{\Theta}_t^{(1)} - \eta_{t+1}^{(1)}\, \boldsymbol{\delta}_1\, \hat{\boldsymbol{x}}_{t+1}^\top, & \text{（反向传播）} \\ \boldsymbol{\Theta}_{t+1}^{(0)} = \boldsymbol{\Theta}_t^{(0)} - \eta_{t+1}^{(0)}\, \boldsymbol{\delta}_0\, \boldsymbol{x}_{t+1}^\top, \end{cases}$$
+
+其中 $\boldsymbol{\delta}_t^{(0)} = \boldsymbol{J}_{\phi^{(0)}}(\boldsymbol{x}_{t+1})^\top \boldsymbol{\Theta}_t^{(1)\top} \boldsymbol{\delta}_{t+1}^{(1)}$，$\hat{\boldsymbol{x}}_{t+1} = \phi^{(0)}(M^{(0)}(\boldsymbol{x}_t))$，$\phi^{(0)}(\cdot)$ 是非线性函数，$\boldsymbol{J}_{\phi^{(0)}(\cdot)}$ 是 Jacobian 矩阵。在这种设计中，两个模块处于同一梯度流中，但基于不同的频率进行更新。我们在第 7 节讨论连续记忆系统（continuum memory systems）时提供了这种设计的示例。
+
+### 通过初始化的知识迁移
+
+模型无关元学习（Model Agnostic Meta-Learning, MAML）(Finn et al. 2017) 是最流行的元学习（或学会学习）形式之一，旨在为模型学习一个全局初始点，使其能够快速学习新任务。从嵌套学习的视角来看，存在两个嵌套的优化过程，其中内层问题在其自身的上下文上迭代并基于其内部目标，高层级问题衡量其自身学习到的权重作为内层问题的初始点。更正式地说，我们有
+
+$$\boldsymbol{\Theta}_0^{(1)} = \arg\min_{\Phi} \mathbb{E}_{C \sim C^{(0)}} \left[ \ell(M^{(1)}(\cdot;\, \Phi),\, C) \right], \tag{28}$$
+
+其中高层级模块在低层级问题可能拥有的所有上下文上学习最佳初始值。如前所述，任何基于 MAML 的学习模型都是此情况的实例，但作为更具体的示例，我们引用第 3.2 节和图 3 中讨论的（MLP 层与线性注意力的比较）示例。
+
+### 通过生成的连接
+
+最常见的知识迁移形式之一是通过生成权重或上下文。即，一个低频率（或高频率）模块为另一个高频率（或低频率）模块生成权重。更正式地说，
+
+$$\begin{cases} \boldsymbol{\Theta}^{(1)} = \boldsymbol{g}\!\left(M^{(0)};\, \mathcal{L}^{(0)}, C^{(0)}, \boldsymbol{\Theta}^{(0)}\right), & \text{或} \\ \boldsymbol{\Theta}^{(0)} = \boldsymbol{g}\!\left(M^{(1)};\, \mathcal{L}^{(1)}, C^{(1)}, \boldsymbol{\Theta}^{(1)}\right), \end{cases} \qquad \text{（权重生成）}$$
+
+$$\begin{cases} C^{(1)} = \boldsymbol{g}\!\left(M^{(0)};\, \mathcal{L}^{(0)}, C^{(0)}, \boldsymbol{\Theta}^{(0)}\right), & \text{或} \\ C^{(0)} = \boldsymbol{g}\!\left(M^{(1)};\, \mathcal{L}^{(1)}, C^{(1)}, \boldsymbol{\Theta}^{(1)}\right). \end{cases} \qquad \text{（上下文生成）}$$
+
+上述知识迁移形式有两个重要示例：(1) **超网络（Hypernetworks）：** 其中目标神经网络的权重由另一个（生成器）网络生成。(2) **优化过程：** 其中架构为优化器生成输入。即，优化器的上下文（或输入数据）是由架构生成的梯度。关于这一主题的更多讨论，参见第 4 节。注意，这个示例不一定是关于"学习型优化器"（learned optimizers）的，它对于常用的优化过程和算法（如梯度下降、Adam (Kingma et al. 2014a)、AdaGrad (Duchi et al. 2011) 等）同样成立。
+
+### 关于设计神经学习模块的说明
+
+在上文中，我们仅讨论了一些可能的知识迁移方法示例以及不同层级之间的潜在连接。然而，嵌套学习和神经学习模块的公式是通用的，因此不限于上述特定方法集合。因此，从嵌套学习的视角设计神经学习模块有两个重要步骤和设计选择：
+
+> **设计神经学习模块：**
+> 开发神经学习模块有两个高层次的设计选择：(1) 优化问题及其频率的设计（即设计 NSAM 中的组件）；(2) 层级间知识迁移的设计。
+
+值得注意的是，通过不同的知识迁移选择，一些学习范式可以被视为神经学习模型的一部分：例如，(1) **元学习（meta-learning）**，当两个层级中的两个模块通过一个层级对另一个进行元学习来传递知识时；更具体地说，(2) **模型无关元学习（MAML）**(Finn et al. 2017)，当知识迁移通过学习初始化实现时；(3) **超网络（Hypernetworks）**，当一个高频率模块为另一个低频率模块生成权重时；(4) **学习型优化器（Learned optimizers）**，当知识迁移通过数据生成实现时（即一个高频率模块为另一个低频率模块生成梯度）。
+## 4 优化器作为学习模块
+
+在本节中，我们首先从联想记忆和数据压缩的视角来审视反向传播（backpropagation）过程以及神经网络的优化。随后，我们讨论基于动量（momentum）的优化器变体如何作为嵌套联想记忆系统的实例。最后，我们从联想记忆的角度讨论能够导向具有更高表达能力的深度优化器的替代方法。
+
+### 4.1 反向传播作为联想记忆
+
+通过反向传播（Linnainmaa 1970; Rumelhart et al. 1986）更新神经网络的权重一直是训练大规模深度神经网络的关键组成部分。直觉上，在这个优化过程中，首先计算模型输出相对于目标的误差，然后根据每一层对该误差的贡献来更新该层。本节旨在通过联想记忆的视角来解释这一过程，并讨论它如何融入嵌套学习（Nested Learning）范式。为了表述的清晰和简洁，我们假设使用深度MLP模型，但以下推导的所有公式同样可以简单地适配到其他架构。给定一个具有 $L$ 层、参数化为 $\{W_\ell \cdot + \boldsymbol{b}_\ell\}_{\ell=1}^{L}$ 的MLP，反向传播中所需的梯度计算如下：
+
+$$\frac{\partial \mathcal{L}}{\partial W_\ell} = \boldsymbol{\delta}_\ell \, \hat{\boldsymbol{x}}_{\ell-1}^\top, \qquad \text{and} \qquad \boldsymbol{\delta}_\ell = \boldsymbol{J}_{\phi_\ell}(\boldsymbol{z}_\ell)^\top \underbrace{W_{\ell+1}^\top \boldsymbol{\delta}_{\ell+1}}_{\text{local output surprise for layer } \ell}, \tag{29}$$
+
+其中 $\boldsymbol{z}_\ell = W_\ell \hat{\boldsymbol{x}}_{\ell-1} + \boldsymbol{b}_\ell$ 是预激活值，因此 $\hat{\boldsymbol{x}}_\ell = \phi_\ell(\boldsymbol{z}_\ell)$ 是第 $\ell$ 层的输出，$\phi_\ell(\cdot)$ 是其非线性激活函数，$\boldsymbol{J}_{\phi_\ell}(\cdot)$ 是Jacobian矩阵。因此，第 $\ell$ 层通过梯度下降的更新计算为：
+
+$$W_\ell^{t+1} = W_\ell^{t} - \eta_t^{\ell+1} \boldsymbol{\delta}_\ell \, \hat{\boldsymbol{x}}_{\ell-1}^\top. \tag{30}$$
+
+这里，$\hat{\boldsymbol{x}}_{\ell-1}$ 是该层的输入，$\boldsymbol{\delta}_\ell$ 度量第 $\ell$ 层的局部误差信号（local error signal），或等价地，它是一个度量第 $\ell$ 层在给定输入下输出"惊讶度"的指标。类似于我们在第3.1节中的示例，我们可以将公式30写成：
+
+$$W_\ell^{t+1} = \arg\min_{W} \langle W \hat{\boldsymbol{x}}_{\ell-1}, \boldsymbol{\delta}_\ell \rangle + \frac{1}{2\eta_t^{\ell+1}} \|W - W_\ell^{t}\|_F^2, \tag{31}$$
+
+这是一个联想记忆模块，旨在将每层的输入 $\hat{\boldsymbol{x}}_{\ell-1}$ 映射到其局部误差信号 $\boldsymbol{\delta}_\ell$（参见Definition 1）。也就是说，上述公式意味着使用梯度下降和反向传播训练神经网络的过程可以被视为一个压缩过程，其中每一层存储其输入与对应局部误差信号之间的映射关系。后续在第4.5节中，我们将讨论这一观点如何帮助设计更具表达力的反向传播学习规则。
+
+> **基于惊讶度的记忆——用反向传播训练深度神经网络：**
+> 用反向传播训练的神经网络通过记忆其预测输出的惊讶程度来从数据中学习；即反向传播是一种联想记忆，将每个数据点映射到其对应预测中的误差。
+
+**反向传播 $\neq$ 线性注意力。** 对公式30的一个常见误解是假设 $\boldsymbol{\delta}_\ell$ 是一个预先计算的项，因此反向传播（至少在线性层上）恢复了Hebb规则（Hebbian rule），从而使优化过程等价于对梯度执行线性注意力。然而，我们的公式表明，反向传播中的更新规则是一个自指过程（self-referential process）（Schmidhuber 1993），其中联想记忆的值由其自身生成，使其成为比简单的梯度线性注意力更为复杂的联想记忆（参见第4.5节）。
+
+### 4.2 基于动量的优化器作为联想记忆
+
+基于动量的优化器是现代机器学习模型训练的主要组成部分（Duchi et al. 2011; Kingma et al. 2014a; Jordan et al. 2024）。为了将基于动量的优化器解释为联想记忆，让我们从简单的梯度下降算法开始：
+
+$$W_{t+1} = W_t - \eta_t \nabla_{W_t} \mathcal{L}(W_t; \boldsymbol{x}_{t+1}), \tag{32}$$
+
+它基于瞬时梯度（惊讶度）更新当前权重状态。这种更新规则没有纳入先前的token以及迄今为止已经遍历的损失曲面信息，导致在许多场景中收敛较慢（或鲁棒性较差）。为了解决这一问题，基于动量的梯度下降方法引入了过去梯度的指数移动平均（EMA）：
+
+$$W_\ell^{t+1} = W_\ell^{t} + \boldsymbol{m}_\ell^{t+1}$$
+
+$$\boldsymbol{m}_\ell^{t+1} = \alpha_{\ell,t+1} \boldsymbol{m}_\ell^{t} - \eta_{\ell,t+1} \nabla_{W_\ell^{t}} \mathcal{L}\left(W_\ell^{t}; \boldsymbol{x}_{t+1}\right) = \alpha_{\ell,t+1} \boldsymbol{m}_\ell^{t} - \eta_{\ell,t+1} \boldsymbol{\delta}_\ell \, \hat{\boldsymbol{x}}_{\ell-1}^\top, \tag{33}$$
+
+其中矩阵（或向量）$\boldsymbol{m}_t$ 是状态 $t$ 的动量，$\alpha_t$ 和 $\eta_t$ 分别是（自适应的）学习率和动量率，$\boldsymbol{\delta}_\ell$ 和 $\hat{\boldsymbol{x}}_{\ell-1}$ 的定义与公式29相同。类似于公式31以及第3.1节中的一个示例，假设 $\alpha_{t+1} = 1$，动量项可以被视为使用梯度下降优化以下目标的结果：
+
+$$\min_{\boldsymbol{m}} \langle \boldsymbol{m}\, \hat{\boldsymbol{x}}_{\ell-1}, \boldsymbol{\delta}_\ell \rangle. \tag{34}$$
+
+$\alpha_{t+1} \neq 1$ 的情形等价于对上述最小化问题加上动量项的 $\ell_2$ 正则化后进行梯度下降。因此，动量确实可以被视为一个联想记忆模块，它学习如何将目标函数的过去梯度压缩到其参数中。与公式31（一个简单的单层联想记忆且更新直接应用于记忆本身）不同，这里动量的状态决定了权重的更新。换言之，这是一个两层优化过程，其中内循环学习动量，外循环使用动量的状态来更新权重。
+
+从这一视角出发，我们可以将动量的定义从指数移动平均推广到任意联想记忆模块，该模块旨在压缩过去的梯度或将每个token的输入映射到其对应的局部误差。这种广义动量（generalized momentum）可以表示为：
+
+$$W_\ell^{t+1} = W_\ell^{t} + \boldsymbol{m}_\ell^{t+1}, \tag{35}$$
+
+其中 $\boldsymbol{m}_\ell$ 是以下联想记忆的解，通过梯度下降优化：
+
+$$\min_{\boldsymbol{m}} \tilde{\mathcal{L}}(\boldsymbol{m}; \hat{\boldsymbol{x}}_{\ell-1}, -\boldsymbol{\delta}_\ell). \tag{37}$$
+
+这里，目标函数 $\tilde{\mathcal{L}}(\cdot)$ 不同于手头问题的原始目标函数，$\tilde{\mathcal{L}}(\cdot)$ 是定义动量并度量其映射质量的目标函数。实际上，此公式中的动量项旨在上下文中（in-context）进行自适应（回忆一下，动量的上下文即为梯度），根据该层的输入来适应局部误差率。大多数流行的优化器被公式化为逐元素更新规则（出于计算效率考虑），因此在附录B中，我们首先探讨动量的逐元素联想记忆公式，并将其与Adam（Kingma et al. 2014a）等流行优化器联系起来。通过展示Adam可以被视为旨在预测梯度方差的 $L_2$ 回归目标的最优联想记忆，我们讨论了其他类似算法，如RMSProp（Hinton et al. 2012）、SignSGD及其基于动量的变体（Bernstein et al. 2018）、NAdam（Dozat 2016）、AMSGrad（Reddi et al. 2016）、RAdam（Liu et al. 2020）和Lion（Chen et al. 2023），它们也都是旨在压缩梯度的联想记忆实例。然后我们超越逐元素公式，展示AdaGrad（Duchi et al. 2011）也是一个联想记忆模块。由于AdaGrad与Shampoo（Gupta et al. 2018）和Soap（Vyas et al. 2025）等优化器的联系——即作为预处理项的近似——我们进而得出结论，所有这些优化器都可以重新表述为联想记忆。接下来，我们更详细地讨论另一类基于预处理（preconditioning）的优化器，并从嵌套学习的视角重新表述它们：
+
+**预处理与Hessian矩阵近似。** 另一类算法是预处理算法，其核心思想是近似Hessian逆矩阵以模拟Newton算法的行为。形式上，带预处理的梯度下降定义为：
+
+$$W_\ell^{t+1} = W_\ell^{t} - \eta_{t+1} \boldsymbol{P}_{t+1}^{-1} \boldsymbol{g}_\ell^{t+1}, \tag{38}$$
+
+其中预处理矩阵（preconditioner）$\boldsymbol{P}_{t+1}$ 通常是一个正定矩阵。预处理矩阵的一个关键解释是其在变换坐标系中执行梯度下降的作用，这可以被视为从梯度到目标坐标系的映射。据此，我们将公式38中的预处理矩阵重新表述和解释为一个联想记忆，它将梯度集合（或梯度的函数，记为 $\boldsymbol{g}$）映射到我们选择的坐标系，记为 $\hat{\boldsymbol{g}}$：
+
+$$W_\ell^{t+1} = W_\ell^{t} - \eta_{t+1} \boldsymbol{P}_{t+1}^{-1} \boldsymbol{g}_\ell^{t+1}, \tag{39}$$
+
+其中在内部（嵌套层级中），$\boldsymbol{P}_{t+1}$ 学习如何通过一个目标函数来执行这种映射：
+
+$$\min_{\boldsymbol{P}} \tilde{\mathcal{L}}(\boldsymbol{P}(\hat{\boldsymbol{g}}); \boldsymbol{g}). \tag{40}$$
+
+在这一观点下，核心问题是找到能够增强压缩过程的最佳坐标系。最简单的变体是恒等映射，其中我们保持度量系统不变并使用 $\boldsymbol{P}$ 将 $\boldsymbol{g}$（即此情形下的梯度）映射到自身，从而得到Adam（Kingma et al. 2014a）和AdaGrad（Duchi et al. 2011）中的预处理项，如附录B所讨论的。这些结果，连同将Adam及其变体表示为联想记忆，表明不仅基于动量的优化器是联想记忆，而且它们还可以被分解为一组嵌套学习问题，每个问题都通过梯度下降进行优化。然而，在更一般的形式中，可以使用更多的嵌套层级，并用梯度下降优化公式40中的内部问题，从而得到：
+
+$$\boldsymbol{P}_{t+1} = \boldsymbol{P}_{t+1} - \zeta_{t+1} \nabla_{\boldsymbol{P}_t} \tilde{\mathcal{L}}(\boldsymbol{P}_t; \boldsymbol{g}_{t+1}, \hat{\boldsymbol{g}}_{t+1}). \tag{41}$$
+
+在嵌套学习框架中，设计有效预处理需要找到 $\hat{\boldsymbol{g}}$ 和 $\tilde{\mathcal{L}}$ 的正确选择。这一观点还可以引出其他类别的基于梯度/动量正交化（orthogonalization）的算法：例如Muon及其变体（Jordan et al. 2024; Cesista 2025; Keigwin et al. 2025）。回顾Muon优化器（Jordan et al. 2024）：
+
+$$W_\ell^{t+1} = W_\ell^{t} + \text{NewtonSchulz}_k\left(\boldsymbol{m}_\ell^{t+1}\right)$$
+
+$$\boldsymbol{m}_\ell^{t+1} = \alpha_{\ell,t+1} \boldsymbol{m}_\ell^{t} - \eta_{\ell,t+1} \nabla_{W_\ell^{t}} \mathcal{L}\left(W_\ell^{t}; \boldsymbol{x}_{t+1}\right), \tag{42}$$
+
+其中 $\text{NewtonSchulz}_k(\cdot)$ 执行 $k$ 步Newton-Schulz正交化过程。从上述关于预处理一般公式的讨论中，可以将 $\text{NewtonSchulz}_k(\cdot)$ 算子视为从梯度或动量项到合适度量系统的映射。Muon中选择的合适坐标系是对梯度进行正交化，因此我们旨在通过最小化损失函数 $\min_{\boldsymbol{P}} \tilde{\mathcal{L}}(\boldsymbol{P}; \boldsymbol{O}, \boldsymbol{m})$ 来找到映射 $\boldsymbol{P}(\cdot)$，其中目标函数 $\tilde{\mathcal{L}}(\cdot; \cdot, \cdot)$ 度量通过 $\boldsymbol{P}(\cdot)$ 从 $\boldsymbol{O}$ 到 $\boldsymbol{m}$ 或 $\boldsymbol{g}$ 的映射质量。这一过程中的关键挑战在于参数 $\boldsymbol{O}$ 本身是未知的，因此该映射需要同时学习映射和合适的正交空间。一个度量正交化的简单公式可以通过将目标函数定义为以下形式来实现：
+
+$$\tilde{\mathcal{L}}(\boldsymbol{P}(\boldsymbol{g}); \boldsymbol{g}) = \|\boldsymbol{P}(\boldsymbol{g})^\top \boldsymbol{P}(\boldsymbol{g}) - \boldsymbol{I}\|_F^2, \tag{43}$$
+
+其中 $\boldsymbol{P}(\boldsymbol{g})$ 是我们旨在直接从梯度中学习的正交空间。该目标函数确保梯度（或动量）与其映射相对接近，同时映射指向正交空间。对上述目标函数进行一步梯度下降以求解 $\boldsymbol{O} = \boldsymbol{P}(\boldsymbol{g})$，得到：
+
+$$\boldsymbol{O}_{i+1} = \boldsymbol{O}_i - \zeta_{i+1} \nabla_{\boldsymbol{O}_i} \tilde{\mathcal{L}}(\boldsymbol{O}_i; \boldsymbol{g}_t) = \boldsymbol{O}_i - \zeta_{i+1}\left(\boldsymbol{O}_i - \boldsymbol{g}_t + 2\boldsymbol{O}_i\left(\boldsymbol{O}_i^\top \boldsymbol{O}_i - \boldsymbol{I}\right)\right), \tag{44}$$
+
+这恢复了3次多项式（初始值 $\boldsymbol{O}_0 = \boldsymbol{g}_t$）。总结而言，较高频率层级学习正交映射，然后较低频率过程使用学到的映射来优化权重。后续在第4.4节中，我们讨论一个更一般的观点，将 $\text{NewtonSchulz}_k(\cdot)$ 视为增强记忆容量的多项式映射。
+
+### 4.3 优化器中的长上下文：正交任务持续学习的示例
+
+当消除训练和测试时间之间的界限，并朝着能够长期持续学习的模型迈进时，（在线）优化器的角色变得更加突出：这主要是由于需要找到有效的"解"而非更快地收敛。然而，找到有效的解需要对目标函数的全局理解以避免"局部最小值"，同时需要避免朝着可能导致对长期过去已学任务产生（灾难性）遗忘的方向移动。从联想记忆的角度来看，如前所述，动量项应当是过去梯度的记忆，帮助优化过程对损失曲面有更全局的视角。然而，当前动量的设计仅作为简单的低通滤波器来平滑梯度更新，因此容量有限，仅能纳入近期过去的信息。
+
+为了更好地说明这一局限性，设 $\beta > 0$ 为动量的衰减项，那么第 $i$ 个之前的梯度对当前动量状态的贡献可以计算为 $\beta^i(1 - \beta)$。考虑梯度对当前动量项状态的累积贡献之和（即 $\boldsymbol{S}_t = \sum_{i=0}^{t} \beta^i(1-\beta)$）以及优化设置中常用的 $\beta = 0.9$ 值，最近的6个梯度（或43个梯度）至少贡献了累积贡献 $\boldsymbol{S}_t$ 的50%（或99%）。这表明超过过去43步之外的梯度及一般的全局信息贡献不足1%，限制了对目标曲面的理解和找到有效解的能力。这个简单的例子表明，当前的设计甚至在纳入长期过去信息方面都是有限的，更不用说其正确检索当前动量状态所需信息的能力了。
+
+回到持续学习（continual learning）的设置，并考虑其具有正交任务的简单变体。设 $\{(\mathcal{T}_i, \mathcal{D}_i, \mathcal{L}_i)\}_{i=1}^{n}$ 为任务集合、其对应的数据和目标函数，使得对于任务 $\mathcal{T}_i$：
+
+$$\mathcal{L}_i(W) = \mathbb{E}_{(\boldsymbol{x}, \boldsymbol{y}) \sim \mathcal{D}_i} (W^\top \boldsymbol{x} - \boldsymbol{y})^2, \tag{45}$$
+
+且梯度存在于正交方向 $\{\boldsymbol{u}_i\}_{i=1}^{n}$ 上。给定任务 $\mathcal{T}_t$（对于足够大的 $t > 1$），当使用带动量的梯度下降优化问题时，在任务 $t$ 上经过多步迭代后，梯度现在指向 $\boldsymbol{u}_t$ 方向。相应地，动量项逐渐偏移，现在大致处于 $\boldsymbol{u}_t$ 方向。这可能导致对过去梯度的逐渐遗忘，进而可能引起模型的灾难性遗忘（catastrophic forgetting）。也就是说，优化过程可能将权重移向损害先前任务性能的方向，主要原因是优化器没有关于它应当避免的旧梯度子空间的记忆。这一失败并非关于模型的容量，而是关于优化过程的记忆管理，即无法找到有效的解。
+
+> **优化器中的长上下文理解：**
+> 从静态模型迈向能够持续从数据/经验中学习的神经学习模块，优化过程本身可以从对梯度子空间的长期压缩/理解中获益，以在多样化的任务集上长期找到有效的解。
+
+受这一观察的启发，我们接下来讨论更具表达力的动量变体，它们能够实现更好的记忆管理和更高的记忆容量：
+
+### 4.4 动量作为联想记忆的更具表达力设计
+
+到目前为止，我们讨论了：(1) 动量项可以被视为旨在将（过去的）梯度压缩到其参数中的联想记忆；(2) 为了开发能够长期持续学习并处理多样化任务集的模型，优化过程需要关于长期过去和损失曲面全局属性的适当信息。接下来，我们讨论嵌套学习和联想记忆视角如何能够导出具有多样化记忆管理/结构的优化器设计：
+
+**扩展：更具表达力的关联。** 如前所述，普通动量项可以被视为无值（value-less）的联想记忆。为了允许更具表达力的联想记忆，并遵循联想记忆的原始定义（即将键映射到值），我们令值参数 $\boldsymbol{v}_i = \boldsymbol{P}_i$，因此动量旨在最小化：
+
+$$\min_{\boldsymbol{m}} \langle \boldsymbol{m}\, \nabla\mathcal{L}(W_i; \boldsymbol{x}_i)^\top, \boldsymbol{P}_i \rangle, \tag{46}$$
+
+或等价地，最小化 $\langle \boldsymbol{m}, \boldsymbol{P}_i \nabla\mathcal{L}(W_i; \boldsymbol{x}_i)\rangle$。使用梯度下降更新动量得到更新规则：
+
+$$W_{i+1} = W_i + \mathbf{m}_{i+1}$$
+
+$$\mathbf{m}_{i+1} = \mathbf{m}_i - \eta_i \boldsymbol{P}_i \nabla\mathcal{L}(W_i; \boldsymbol{x}_i), \tag{47}$$
+
+其中我们还包含了一个遗忘门 $\alpha_{i+1}$ 用于遗忘过去。这种更新规则可以被视为对动量梯度下降的预处理。这里，带预处理的动量项被解释为一种联想记忆，它学习如何压缩 $\boldsymbol{P}_i$ 与梯度项 $\nabla\mathcal{L}(W_i; \boldsymbol{x}_i)$ 之间的映射。虽然任何合理的预处理选择（例如随机特征）也可以用来提高初始版本的带动量梯度下降的表达力。需要注意的是，我们在公式39中关于预处理的讨论与此处不同，那里指出可以将预处理矩阵作为适当映射来学习，而上述公式表明当使用预处理时，动量项（作为梯度的记忆）旨在将梯度映射到其映射函数。
+
+**扩展：更具表达力的目标函数。** 重新审视动量的公式：对于给定的梯度 $\nabla\mathcal{L}(W_i; \boldsymbol{x}_i)$，动量映射基于点积相似度作为内部目标函数（如上所述），因此其更新规则是Hebb规则（Hebb 2005）。从联想记忆的角度来看，这种更新规则的容量有限（Storkey 1997），并且使动量的更新规则独立于其当前状态。因此，它限制了跟踪/压缩损失曲面信息的能力。一个自然的扩展是将内部目标函数替换为 $L_2$ 回归损失（用于度量相应的键-值映射适配度），并最小化损失函数 $\|\boldsymbol{m}\nabla\mathcal{L}(W_i; \boldsymbol{x}_i)^\top - \boldsymbol{P}_i\|_2^2$，从而得到更新规则：
+
+$$W_{i+1} = W_i + \mathbf{m}_{i+1}, \tag{48}$$
+
+$$\mathbf{m}_{i+1} = \mathbf{m}_i \alpha_{i+1} - \nabla\mathcal{L}(W_i; \boldsymbol{x}_i)\left(\nabla\mathcal{L}(W_i; \boldsymbol{x}_i)^\top - \eta_t \boldsymbol{P}_i\right) \nabla\mathcal{L}(W_i; \boldsymbol{x}_i), \tag{49}$$
+
+该更新基于Delta规则（delta rule）（Prados et al. 1989），因此它允许记忆（动量）更好地管理其有限容量（即 $O(N)$）并更好地记忆过去梯度的序列。例如，我们可以在优化过程中学习遗忘某些过去的梯度（类似于在联想记忆中从线性注意力过渡到Delta规则时发生的情况）。我们将这种类型的动量项的变体称为**Delta动量**（Delta Momentum）变体。
+
+**扩展：更具表达力的记忆。** 将动量视为一个压缩器或将过去梯度存储到其元素（参数）中的记忆，其容量不仅取决于其更新规则（类似于上述），还需要更具表达力的结构以允许更大的容量。当前的公式基于线性层（即矩阵值）来压缩过去的梯度值，但这种线性特性可能将能力限制为仅学习过去梯度的线性映射。为了增加该模块的学习容量，可以使用更复杂的映射，例如用MLP替换用于动量的线性矩阵值记忆。这种设计允许动量记忆更多的梯度，从而为优化过程提供更好的信息。我们将公式33的公式扩展为：
+
+$$W_{i+1} = W_i + \mathbf{m}_{i+1}(\boldsymbol{u}_i), \qquad \text{and} \qquad \mathbf{m}_{i+1} = \alpha_{i+1} \mathbf{m}_i - \eta_t \nabla\mathcal{L}^{(2)}(\boldsymbol{m}_i; \boldsymbol{u}_i, 1), \tag{50}$$
+
+其中 $\boldsymbol{u}_i = \nabla\mathcal{L}(W_i; \boldsymbol{x}_i)$，$\nabla\mathcal{L}^{(2)}(\cdot)$ 是动量的内部目标函数（例如点积相似度 $\langle \boldsymbol{m}(\boldsymbol{u}_i^\top), 1\rangle$）。我们将这一变体称为**深度动量梯度下降**（Deep Momentum Gradient Descent, DMGD）。虽然从这个例子中可以清楚地看出，但值得强调的是，内部损失函数和模型需要精心设计以获得有效的动量模块。
+
+**扩展：带高阶特征映射的记忆。** 增强记忆容量的常用技术之一是在键上使用高阶特征映射（Katharopoulos et al. 2020; Kacham et al. 2024）。将这种技术应用于动量项，可以获得：
+
+$$W_{i+1} = W_i + \mathbf{m}_{i+1} \qquad \text{and} \qquad \mathbf{m}_{i+1} = \alpha_{i+1} \mathbf{m}_i - \eta_t \boldsymbol{P}_i \phi(\nabla\mathcal{L}(W_i; \boldsymbol{x}_i)), \tag{51}$$
+
+其中 $\phi(\cdot)$ 是一个高阶特征映射（可以通过其内部目标函数来学习）。
+
+**扩展：非线性输出。** 基于动量的联想记忆视角，增强记忆模块表示能力的一种常用技术是在其输出之上使用非线性变换（Sun et al. 2024; Behrouz et al. 2025c）。也就是说，我们将公式50重新表述为：
+
+$$W_{i+1} = W_i + \sigma(\mathbf{m}_{i+1}(\boldsymbol{u}_i)), \qquad \text{and} \qquad \mathbf{m}_{i+1} = \alpha_{i+1} \mathbf{m}_i - \eta_t \nabla\mathcal{L}^{(2)}(\boldsymbol{m}_i; \boldsymbol{u}_i, I), \tag{52}$$
+
+其中 $\sigma(\cdot)$ 是任意非线性函数。例如，我们令 $\sigma(\cdot) = \text{NewtonSchulz}(\cdot)$，其中 $\text{NewtonSchulz}(\cdot)$ 是迭代Newton-Schulz方法（Higham 2008），$\boldsymbol{m}(\cdot)$ 为线性层；这就得到了Muon（Jordan et al. 2024）。
+
+**优化器长上下文的一个玩具示例。** 在第4.3节中，我们讨论了在复杂设置下，包括具有正交任务的持续学习中，我们可能需要更复杂的动量项，无论是具有更高容量还是更好的记忆管理。为了更好地说明其他动量记忆设计的潜在增益，我们使用一个时变曲率（time-varying curvature）的玩具示例。由于标准动量充当低通滤波器，如果曲面以高频变化，那么旨在使用过去梯度加权平均的标准动量将受到无关梯度项的影响，延迟收敛。作为说明性示例，考虑：
+
+$$\boldsymbol{\psi}(r, \theta) = r^2 + k \times (r - \theta + \alpha \sin(\omega r))^2, \tag{53}$$
+
+并使用标准动量和我们的Delta动量来优化它。我们从点 $(r_0, \theta_0) = (-3.5, 2)$ 开始优化过程，并持续到其中一个算法收敛到最优解。结果可视化在图4中。Delta动量更快地找到了解，主要得益于其梯度依赖的权重衰减，帮助动量项在需要时进行衰减或停止。
+
+> **图4：** 使用标准动量和所提出的Delta动量优化函数 $\boldsymbol{\psi}(r, \theta)$。Delta动量由于其梯度依赖的权重衰减而收敛更快。
+
+### 4.5 超越简单梯度下降和动量
+
+回到第3.1节关于预训练过程和反向传播作为联想记忆形式的讨论，在本节中，我们旨在利用嵌套学习的视角，提出梯度下降的更一般形式。如第4.1节所观察的，带梯度下降的反向传播是一种联想记忆，旨在将输入数据映射到由其预测输出引起的惊讶度 $\nabla_{y_t} \mathcal{L}(W_t; \boldsymbol{x}_t)$：
+
+$$W_{t+1} = W_t - \eta_{t+1} \nabla_W \mathcal{L}(W_t; \boldsymbol{x}_t) = W_t - \eta_{t+1} \nabla_y \mathcal{L}(W_t; \boldsymbol{x}_t) \otimes \boldsymbol{x}_t, \qquad \text{where } \boldsymbol{x}_t \sim \mathcal{D}_{\text{train}}, \tag{54}$$
+
+从联想记忆视角和近端梯度（proximal gradient）观点来看，这等价于：
+
+$$W_{t+1} = \arg\min_W \langle W \boldsymbol{x}_t, \nabla_{y_t} \mathcal{L}(W_t; \boldsymbol{x}_t)\rangle + \frac{1}{2\eta_t} \|W - W_t\|_2^2. \tag{55}$$
+
+这一步旨在学习梯度的负方向。点积相似度作为内部目标函数的主要缺点在于，其对应的更新规则和学习算法将每个数据样本（梯度）独立于状态来处理，这意味着权重的状态以及先前的梯度不会影响当前状态的更新项。虽然这种设计对于上下文中元素独立的嵌套问题（例如用于训练的独立同分布样本）可以是有效的，但对于具有高度依赖元素的上下文（例如序列中的token）则可能是受限的。
+
+定义 $\mathbf{u}_t = -\nabla_{y_t} \mathcal{L}(W_t; \boldsymbol{x}_t)$，可以将这一过程扩展到更具表达力的目标函数，例如 $L_2$ 回归损失：
+
+$$W_{t+1} = \arg\min_W \frac{1}{2}\|W \boldsymbol{x}_t - \mathbf{u}_t\|_2^2 + \frac{1}{2\eta_t}\|W - W_t\|_2^2. \tag{56}$$
+
+对于 $\boldsymbol{x}_t$ 已被归一化的情形（例如在归一化记忆系统中或在具有归一化层的神经网络中，$\|\boldsymbol{x}_t\|^2 = \lambda$），通过定义 $\eta_t' = \frac{\eta_t}{1 + \eta_t}$，我们可以使用Sherman-Morrison引理得到（详见附录C）：
+
+$$W_{t+1} = W_t\left(I - \eta_t' \boldsymbol{x}_t \boldsymbol{x}_t^\top\right) - \eta_t' \nabla_{W_t} \mathcal{L}(W_t; \boldsymbol{x}_t)$$
+
+$$= W_t\left(I - \eta_t' \boldsymbol{x}_t \boldsymbol{x}_t^\top\right) - \eta_t' \nabla_{y_t} \mathcal{L}(W_t; \boldsymbol{x}_t) \otimes \boldsymbol{x}_t, \qquad \text{where } \boldsymbol{x}_t \sim \mathcal{D}_{\text{train}}. \tag{57}$$
+
+这种新算法，基于Delta规则（Prados et al. 1989）我们称之为**Delta梯度下降**（Delta Gradient Descent, DGD），不仅根据当前元素更新权重，还纳入了先前的权重状态，从而产生基于当前数据样本的自适应衰减项。接下来，我们讨论关于带梯度下降的反向传播过程的更一般化视角，这将帮助我们后续表述广义梯度下降（Generalized Gradient Descent）学习规则族：
+
+> **用反向传播训练深度神经网络是一个自指过程：**
+> 如早先在第4.1节所讨论的，对梯度下降的一个常见误解是将其视为一种线性递推形式（例如线性注意力）。然而，在传统的线性递推中，键和值独立于记忆的状态，因此允许公式的并行化。在"梯度下降作为联想记忆"的视角中，值是记忆状态的函数，因此它是一个自指模型（self-referential model）（Schmidhuber 1993），通过生成自身的值来控制自己的学习过程。更形式化地，可以将该过程重新表述为：
+>
+> $$W_{t+1} = W_t + \eta_{t+1} \boldsymbol{v}_t \otimes \boldsymbol{x}_t, \qquad \boldsymbol{v}_t = \boldsymbol{f}_{W_t}(\boldsymbol{x}_t) = -\nabla_{y_t} \mathcal{L}(W_t; \boldsymbol{x}_t), \tag{58}$$
+>
+> 这意味着在每一步中 $\boldsymbol{v}_t$ 由记忆 $W_t$ 和输入 $\boldsymbol{x}_t$ 生成。
+
+基于上述解释，可以将带梯度下降的反向传播以一般形式定义为任何旨在压缩训练样本作为键并将其映射到自生成值以更好地控制自身学习过程的自指模型。基于这一定义，我们在附录C中的上述公式仅是使用 $L_2$ 回归损失的一个简单实例；然而，一般而言，可以定义广义梯度下降（GGD）如下：
+
+> **Definition 5（广义梯度下降（GGD）学习规则）。** 广义梯度下降（Generalized Gradient Descent, GGD）学习规则是一种自指联想记忆，旨在压缩数据样本并将其映射到一组自生成的键：
+>
+> $$W_{t+1} = \arg\min_W \tilde{\mathcal{L}}(\boldsymbol{x}_t, \boldsymbol{u}_t) + \text{Ret}\left(W, \{W_i\}_{i=t-c+1}^{t}\right), \tag{59}$$
+>
+> 其中 $\boldsymbol{u}_t$ 是一个自生成的值：
+>
+> $$\boldsymbol{u}_t = \boldsymbol{f}_{W_t}(\boldsymbol{x}_t), \tag{60}$$
+>
+> 对于某个由 $W_t$ 参数化的函数 $\boldsymbol{f}_{W_t}(\cdot)$。这里，$\tilde{\mathcal{L}}(\cdot)$ 度量映射的质量，$\text{Ret}(\cdot)$ 确保新实例的解不会远离当前状态。
+
+类似地，这一公式可以适配到动量项，从而得到**广义动量**（Generalized Momentum, GM）。然而，值得注意的是，动量本身是一种传统的联想记忆，其键和值是给定的，或更确切地说，是由较低频率层级生成的。在第4.2节中，我们探讨了这一公式的一个特殊情形，其中 $\mathcal{L}(\cdot)$ 为 $L_2$ 回归损失。
+
+**关于持续学习设置中优化器的说明。** 如上所述，优化器本身是学习模块或联想记忆，旨在将梯度压缩到其参数中。这些参数在传统术语中不一定是可训练的，但基于动量的优化器确实存储了关于损失曲面的知识，帮助它们更好地更新权重。当神经学习模块的"预训练结束"时，存储在动量项中的关于梯度/数据分布的知识从模型中移除，因此在不恢复动量状态的情况下继续训练可能影响模型学习新能力。当模型处于持续学习设置中时，关于数据的知识存储在传统参数中（通过反向传播优化），但关于模型如何自我优化以及关于目标空间的知识则在较低频率层级的优化中被优化（例如动量项）。
+## 5 现有架构作为神经学习模块
+
+现代序列模型，如Transformer（Vaswani et al. 2017）和循环模型（Katharopoulos et al. 2020; Schlag et al. 2021; Sun et al. 2024; Behrouz et al. 2025c），是近年来语言模型研究进展的核心骨干。最近，这些模型与联想记忆（associative memory）之间的等价关系——即从数据中学习键到值的映射——已在不同设置和目标函数下得到了研究（Liu et al. 2024b; Sun et al. 2024; Behrouz et al. 2025b; Wang et al. 2025）。我们特别关注Miras（Behrouz et al. 2025b）的通用框架，该框架将联想记忆定义为定义1，并通过选定的优化算法在任意函数类（即记忆架构）上优化内部目标（称为"注意力偏置"）。虽然仅此公式化即表明众所周知的架构是联想记忆嵌套系统（NSAM）的实例，但接下来我们将回顾若干学习规则和架构的这种等价关系。
+
+从现在起，我们假设键 $\{\boldsymbol{k}_i\}_{i=1}^{L}$、值 $\{\boldsymbol{v}_i\}_{i=1}^{L}$ 和查询 $\{\boldsymbol{q}_i\}_{i=1}^{L}$ 已给定：它们通常被定义为输入的投影，即
+
+$$
+\boldsymbol{k}_t = \boldsymbol{x}_t W_{\boldsymbol{k}}, \qquad \boldsymbol{v}_t = \boldsymbol{x}_t W_{\boldsymbol{v}}, \qquad \boldsymbol{q}_t = \boldsymbol{x}_t W_{\boldsymbol{q}}.
+\tag{61}
+$$
+
+在这种设计中，由于投影参数（即 $W_{\boldsymbol{k}}$、$W_{\boldsymbol{v}}$ 和 $W_{\boldsymbol{q}}$）在较低频率层级中被优化，序列模型组件（例如自注意力）具有较高的频率，因此联想记忆的学习过程发生在较低的层级。因此，为了清晰起见，我们仅讨论较高频率层级（即联想记忆的内部学习过程）。
+
+**Softmax注意力。** 从联想记忆的视角来看：给定键 $\{\boldsymbol{k}_i\}_{i=1}^{L}$、值 $\{\boldsymbol{v}_i\}_{i=1}^{L}$ 和查询 $\{\boldsymbol{q}_i\}_{i=1}^{L}$，Softmax注意力模块（Bahdanau 2014; Vaswani et al. 2017）可以被重新表述为使用Nadaraya-Watson估计器对 $\ell_2(\cdot)$ 回归目标的非参数解（Fan 2018; Zhang et al. 2022）：
+
+$$
+M^{*} = \arg\min_{M} \sum_{i=1}^{L} s(\boldsymbol{k}_i, \boldsymbol{q}) \|\boldsymbol{v}_i - M\|_2^2 = \sum_{i=1}^{L} \frac{s(\boldsymbol{k}_i, \boldsymbol{q})}{\sum_{j=1}^{L} s(\boldsymbol{k}_j, \boldsymbol{q})} \boldsymbol{v}_i,
+\tag{62}
+$$
+
+其中 $L$ 为序列长度（Sun et al. 2024）。该公式化针对整个上下文优化记忆 $M(\cdot)$；然而，一种设计选择是将优化过程限制在过去 $c$ 个token上，从而得到：
+
+$$
+M^{*} = \arg\min_{M} \sum_{i=t-c+1}^{t} s(\boldsymbol{k}_i, \boldsymbol{q}_i) \|\boldsymbol{v}_i - M\|_2^2 = \sum_{i=t-c+1}^{t} \frac{s(\boldsymbol{k}_i, \boldsymbol{q})}{\sum_{j=t-c+1}^{t} s(\boldsymbol{k}_j, \boldsymbol{q})} \boldsymbol{v}_i,
+\tag{63}
+$$
+
+这等价于滑动窗口注意力（SWA）。因此，注意力及其更具表达力的变体（Wang et al. 2025）也是定义1的实例，只不过我们找到的是映射的最优非参数解，而非使用梯度下降或其他参数化方法。
+
+**基于Hebb规则的循环神经网络。** 第一代现代循环架构（例如线性注意力（Katharopoulos et al. 2020）、RetNet（Sun et al. 2023）、RWKV（Peng et al. 2023）、lightening attention（Li et al. 2025））基于类Hebb学习规则（Hebb 2005）。对于这类模型，衡量键与值之间映射质量的内部目标是点积相似度。即，给定矩阵值记忆 $M \in \mathbb{R}^{d \times n}$、键和值 $\boldsymbol{k}, \boldsymbol{v} \in \mathbb{R}^d$、目标函数 $\tilde{L}(M; \boldsymbol{k}_t, \boldsymbol{v}_t) := -2\langle M\boldsymbol{k}_t, \boldsymbol{v}_t \rangle$ 以及核函数 $\phi(\cdot)$，我们使用梯度下降和权重衰减来优化等价的联想记忆优化问题（见定义1），得到：
+
+$$
+M_t = \alpha_t M_{t-1} - \eta \nabla_{M_{t-1}} \tilde{L}(M_{t-1}; \phi(\boldsymbol{k}_t), \boldsymbol{v}_t) = \alpha_t M_{t-1} + \eta_t \underbrace{\boldsymbol{v}_t \phi(\boldsymbol{k}_t^\top)}_{-\boldsymbol{v}_t \phi(\boldsymbol{k}_t^\top)},
+\tag{64}
+$$
+
+这恢复了原始的线性注意力递推关系（Katharopoulos et al. 2020）。通过对 $\alpha_t$ 的不同设置（即取值为1、可学习、通道级和/或输入依赖的）以及 $\phi(\cdot)$ 的不同选择（即恒等映射、多项式核等），上述递推关系可以恢复基于Hebb规则的线性注意力的不同变体（Katharopoulos et al. 2020; Sun et al. 2023; Arora et al. 2024; Beck et al. 2024; Kacham et al. 2024; Peng et al. 2024）。因此，基于Hebb规则的线性注意力变体可以被重新表述为一个优化问题的过程，其中记忆旨在基于点积相似度目标，通过梯度下降学习键与值之间的映射。
+
+**基于Delta规则的循环神经网络。** 为了改善记忆管理并增强上述模型组的记忆容量，若干研究建议将循环神经网络（RNN）中的Hebb规则替换为Delta规则作为学习算法（Schlag et al. 2021），由此产生了DeltaNet（Schlag et al. 2021）、Longhorn（Liu et al. 2024b）和RWKV7（Peng et al. 2025b）等模型。当令 $M \in \mathbb{R}^{d \times n}$ 时，Delta规则等价于以 $\text{Ret}_t(M, M_{t-1}) = \|M_t - M_{t-1}\|_F^2$ 作为局部保持项（local retention），使用随机梯度下降优化MSE目标 $\tilde{L}_t = \|M_t \boldsymbol{k}_t - \boldsymbol{v}_t\|_2^2$：
+
+$$
+M_t = M_{t-1} - \eta_t \nabla_{M_{t-1}} \tilde{L}(M_{t-1}; \phi(\boldsymbol{k}_t), \boldsymbol{v}_t) = \underbrace{(I - \eta_t \boldsymbol{k}_t \boldsymbol{k}_t^\top)}_{(M_{t-1}\boldsymbol{k}_t - \boldsymbol{v}_t)\boldsymbol{k}_t^\top} M_{t-1} + \eta_t \boldsymbol{v}_t \boldsymbol{k}_t^\top.
+\tag{65}
+$$
+
+使用其他形式的保持门（例如 $\text{Ret}_t(M, M_{t-1}) = \|M_t - \alpha_t M_{t-1}\|_F^2$）、带权重衰减的优化算法（例如对给定 $q > 0$ 以 $\|M_t\|_q^q$ 进行正则化）、多步梯度下降，以及/或可学习参数 $\eta_t$ 和 $\alpha_t$ 的不同形式化，可以产生Delta规则的多种变体（Irie et al. 2021; Liu et al. 2024b; Sun et al. 2024; Behrouz et al. 2025b; Hu et al. 2025; Peng et al. 2025b; Siems et al. 2025; Wang et al. 2025）。因此，Delta规则及其变体都是一个优化问题的实例，其中模型旨在基于 $L_2$ 回归目标学习键与值之间的映射。
+
+**超越传统学习规则：Omega、Oja规则及非欧几里得学习规则。** 近年来，从联想记忆视角（见定义1）设计架构并采用更复杂的内部目标和/或优化算法的兴趣日益增长，由此产生了超越Delta和Hebb规则的学习算法（Irie et al. 2022a; Von Oswald et al. 2023; Behrouz et al. 2025a,b; Zhang et al. 2025）。具体而言，为了增强Hebb规则的稳定性（如公式64所讨论），Irie et al.（2022a）基于Oja规则（Oja 1982）引入了OjaNet，其递推关系为：
+
+$$
+M_t = \alpha_t M_{t-1} + \eta_t \left(\boldsymbol{v}_t \phi(\boldsymbol{k}_t)^\top - M_{t-1}^\top \boldsymbol{v}_t\right).
+\tag{66}
+$$
+
+在联想记忆的表述中（如定义1），该递推关系可以简单地被重新表述为一步梯度下降：
+
+$$
+M_t = M_{t-1} - \eta_t \underbrace{\nabla_{M_{t-1}} \tilde{L}(M_{t-1}; \phi(\boldsymbol{k}_t), \boldsymbol{v}_t)}_{M_{t-1}^\top \boldsymbol{v}_t - \boldsymbol{v}_t \phi(\boldsymbol{k}_t)^\top},
+\tag{67}
+$$
+
+其中 $\tilde{L}(M; \boldsymbol{k}_t, \boldsymbol{v}_t) = -2\langle M\boldsymbol{k}_t, \boldsymbol{v}_t \rangle + \|M^\top \boldsymbol{v}_t\|_2^2$，$\phi(\cdot)$ 为核函数（Irie et al. 2022a, 2025b）。尽管该设计通过强制单神经元的单位范数约束增强了Hebb学习规则，但据报道其经验性能不如基于Delta学习规则的模型（Irie et al. 2022a）。为了通过设计更具表达力的目标函数进一步增强Delta规则，Behrouz et al.（2025b）最近提出超越欧几里得空间，将 $L_p = \|\cdot\|_p^p$ 范数用于内部回归目标，在长上下文任务中展现出优于Delta规则及其变体的经验性能和鲁棒性。
+
+虽然大多数学习规则是在线更新机制——即在每个状态下，模型只需保留记忆和当前的（批次）输入——Omega规则（Behrouz et al. 2025a）提出了一种基于过去（批次）输入集合（或全部输入）的更新规则。具体而言，给定具有任意结构的记忆 $M$、键和值 $\boldsymbol{k}, \boldsymbol{v} \in \mathbb{R}^d$、任意目标函数 $\tilde{L}(M; \boldsymbol{k}_t, \boldsymbol{v}_t)$ 以及核函数 $\phi(\cdot)$，Omega规则定义为：
+
+$$
+M_t = \alpha_t M_{t-1} - \sum_{i=t-c+1}^{t} \gamma_{t,i} \tilde{L}(M_t; \phi(\boldsymbol{k}_i), \boldsymbol{v}_i),
+\tag{68}
+$$
+
+其中 $c \geq 1$ 为缓存输入的局部窗口。注意，在 $\gamma_{t,i} = 1$ 且 $c$ 等于整个上下文长度的特殊情况下，上述设计的最优解退化为在线情况，其中更新规则仅依赖于当前状态和当前输入（Von Oswald et al. 2023）。关于将架构表示为联想记忆及优化问题的更详细讨论，我们建议读者参阅Behrouz et al.（2025b）。
+
+**关于现代序列模型中门控机制的说明。** 现代语言模型中最近的一项架构变化是将线性层的输出与序列模型的输出进行门控（gating）。尽管该方法带来了显著的性能提升，但其增强性能的机制仍不清楚。正如我们在图3及其对应示例中所讨论的，当记忆的初始状态经过元学习时，前馈网络与现代循环记忆模块（例如线性注意力（Katharopoulos et al. 2020）或深层记忆模块（Behrouz et al. 2025c））之间的主要区别在于记忆模块中执行上下文学习（in-context learning）并根据上下文调整其状态的第二层级。从这个视角来看，当记忆的初始值未经元学习时，它仅依赖于记忆的上下文适应，因此在该模块中没有存储预训练知识的持久记忆系统。因此，当记忆的初始值未经元学习时——这在早期线性Transformer变体中很常见——线性注意力的门控充当持久记忆和记忆模块的初始化。
+
+### 5.1 重新审视嵌套学习的人脑视角
+
+在第1.1节中，我们讨论了人脑的结构如何是统一且可复用的，以及我们是否需要深度学习中的新架构，还是应当重新审视我们关于当前模型异质性的认知。在前几节中，我们观察到神经网络的优化过程和神经架构都可以被表述为一组嵌套和/或并行的优化问题，其中记忆结构是前馈层（例如深层MLP、线性层等），目标通过梯度下降或Newton方法进行优化。
+
+从这个视角来看，现代架构是一组人工神经元（即线性或深层前馈网络），每组神经元拥有各自的内部目标，因而有各自的更新机制。为此，作为一个简单示例，让我们回顾图3中的AdaTransformer：给定 $X = \{\boldsymbol{x}_i\}_{i=1}^{T}$ 作为输入序列，该模块的输出计算如下（为简化起见，我们假设 $\text{MLP}(\cdot) = \cdot\, W_{\text{MLP}}$，并省略归一化）：
+
+$$
+\boldsymbol{k}_t = \boldsymbol{x}_t W_{\boldsymbol{k}}, \qquad \boldsymbol{v}_t = \boldsymbol{x}_t W_{\boldsymbol{v}}, \qquad \boldsymbol{q}_t = \boldsymbol{x}_t W_{\boldsymbol{q}},
+$$
+
+$$
+\boldsymbol{y}_{\text{attn},t} = \text{Attn}(\boldsymbol{k}_t, \boldsymbol{v}_t, \boldsymbol{q}_t), \qquad \boldsymbol{y}_{\text{block},t} = \boldsymbol{y}_{\text{attn},t}\, W_{\text{LinAttn},t},
+$$
+
+$$
+\text{where} \quad W_{\text{LinAttn},t} = W_{\text{LinAttn},t-1} + \boldsymbol{v}_t \boldsymbol{k}_t^\top.
+\tag{69}
+$$
+
+最低频率层级负责优化 $W_{\boldsymbol{k}}$、$W_{\boldsymbol{v}}$ 和 $W_{\boldsymbol{q}}$，它们都是前馈网络，因此是统一的。注意力本身也是回归目标的非参数矩阵值解，这再次验证了其结构是人工神经元（即参数）的矩阵。最后，Linear Attention++组件等价于在线性函数类上优化映射的点积相似度。因此，所有参数都是矩阵值或深层前馈层，这意味着架构各组件之间唯一的区别在于它们的层级、目标和/或学习更新规则。
+
+> **现代深度学习模型具有统一且可复用的结构**
+>
+> 神经学习模块（Neural Learning Module）由一组前馈网络组成，每个前馈网络在不同的层级和时间尺度上被优化。然而，我们在深度学习架构中观察到的异质性源于对嵌套学习（NL）这一新维度缺乏认知，导致我们仅看到优化问题的解，从而产生了深度学习架构的幻象。
+
+---
+
+## 6 要点总结与常见术语再审视
+
+在前几节中，我们讨论了嵌套学
+
+习的概念，以及神经网络中广为人知的组件（如流行的优化器和架构）如何归入嵌套学习范式。在本节中，我们讨论要点总结、不同概念之间的联系，以及嵌套学习视角对常见术语的影响。
+
+**记忆与学习。** 长期以来，在机器学习模型中，记忆（memory）被视为一个独立的模块，其参数与其他组件之间有明确的区分。这类设计通常假设存在短期和/或长期记忆模块，其中短期记忆负责局部上下文，而长期记忆则存储模型中的持久知识。然而在人脑中，记忆被认为是一个分布式的互联系统，没有明确已知的独立负责短期或长期记忆的组件。在嵌套学习中，我们采用了神经心理学文献中关于记忆和学习的通用术语，指出：记忆是由输入引起的神经更新，因此学习是获取有用记忆的过程（Okano et al. 2000）。从这个视角来看，在神经学习模块（Neural Learning Module）的任何层级中，梯度下降（或任何其他优化算法）所进行的任何更新都被视为一种记忆形式。有趣的是，我们在第4.1节中关于梯度下降是（自指的）联想记忆的发现与该术语一致。此外，基于该术语，在连续记忆系统（continuum memory system）中，神经更新以不同的频率进行，因此记忆以不同的时间尺度存储，从而在灾难性遗忘方面实现更鲁棒的记忆管理。
+
+> **嵌套学习视角下的记忆与学习：**
+>
+> 记忆不是一个孤立的系统，而是分布在所有参数中。特别地，任何由输入引起的更新都是存储在神经网络中的记忆，而有效存储、编码以及总体上获取此类记忆的过程被称为学习过程。
+
+**关于模型参数的一般性说明。** 模型的参数是其关键组件之一，它们构成了知识存储、内部计算和适应性的单元。在过去的几十年中，只有机器学习模型架构中（一个子集的）参数被称为可学习实体，这主要是因为它们是我们在训练数据上直接且有意识地进行优化的唯一组件。从嵌套学习的视角来看，这些参数位于最低频率层级（最高层级），并针对每个（批次的）样本进行更新。然而，它们并非唯一对模型内部计算、知识存储和适应性有贡献的参数。如第4.2节先前所讨论的，动量就是这样一个例子，其参数随时间（通过梯度下降）更新，并存储了关于模型迄今为止损失景观的知识。当模型进行持续学习时，这些信息至关重要，主要因为要找到有效的解，优化器需要拥有更多关于损失景观全局属性的信息。另一个例子是循环神经网络的记忆（或隐藏状态）。虽然这些参数不在最低频率层级中被直接优化，但它们存储了关于当前上下文的重要知识。当上下文改变时，由于层级之间缺乏知识迁移（knowledge transfer），这些参数中的压缩知识会被丢弃。
+
+> **模型拥有比我们所知更多的参数：**
+>
+> 神经学习模块的参数不仅限于在预训练层级中被优化的那些；出现在模型NL表示中的所有参数都对其性能和表达能力有贡献。
+
+**每个神经元进行更多的计算。** 关于嵌套学习概念的一个常见误解是将模型设计和多层级堆叠限制在连续记忆系统（CMS）的情况。一般而言，堆叠层级可以帮助模型增强计算深度，并对最低频率层级中的每个参数执行更多的内部计算。此类设计的一个例子是Muon优化器和 $\text{NewtonSchulz}_k(\cdot)$ 运算（见公式42-44），我们已展示其等价于一个内部优化过程。在该设计中，对于动量更新的每一步，我们需要 $k$ 步内部过程来学习如何将梯度映射到正交空间。
+
+**上下文学习（In-Context Learning）。** 在本文中，我们使用"上下文学习"最一般性的定义，将其理解为模型适应给定上下文并从中学习的能力。遵循NSAM的定义，每个模块或层级都有其自身的上下文流，因此对该上下文的任何神经更新或适应都被视为上下文学习的一种形式。由于Transformer的流行以及其作为首个研究上下文学习的模型，上下文学习的概念有时被等同于将输出以整个上下文为条件进行生成。考虑到上下文学习的一般性术语，这种表述只是上下文学习的一个实例，我们称之为非参数上下文学习（non-parametric in-context learning）。然而一般而言，循环模型中的记忆也在执行上下文学习，其中输出以压缩后的上下文为条件。因此，从嵌套学习的视角来看，所有层级都在执行上下文学习，但各自在其自身的上下文流上使用各自的学习更新和优化过程。
+
+基于这一定义，上下文学习是模型的一种能力，可以从其NL表示中透明地看出，其本身并非一种涌现特性（emergent characteristic），而是神经学习模块的NL表示中具有多个层级的直接结果。虽然这似乎与先前关于上下文学习是涌现特性的论断相矛盾（Brown et al. 2020; Singh et al. 2023），但值得注意的是，模型在上下文学习任务中的良好表现还需要一个强大的低频层级，使高频层级能够快速适应。当模型未经充分训练时，较高频率层级只能依靠自身从上下文中学习。这种设置可能导致较差的性能，主要因为上下文中可能没有足够的数据使高频参数收敛。
+
+**测试时学习（test-time learning）/记忆化。** 近年来，测试时训练（Sun et al. 2024; Wang et al. 2025）或测试时记忆化（test-time memorization）（Behrouz et al. 2025b）的概念作为设计强大序列模型的骨干框架日益流行。在这些框架中，给定上下文，一个新的组件/模块旨在使用学习规则和目标函数将上下文压缩到其参数中。在这种表述中，当上下文被移除时，所获取的上下文知识也随之消失。正如前面部分所讨论的，这种更新机制和学习过程实际上是"参数化上下文学习"（parametric in-context learning）的一个实例：
+
+> **测试时训练/记忆化是上下文学习的实例**
+>
+> 通常被称为测试时训练和测试时记忆化的概念，实际上是参数化上下文学习的实例，其中所获取的上下文知识在当前上下文被移除后不会持续存在。
+
+值得注意的是，当转向持续学习的场景时，不存在测试时和训练时的区分，因此将（参数化的）上下文学习称为测试时学习/记忆化可能会产生误导。
+
+**预训练与测试时间。** 从嵌套学习的视角来看，最低频率层级（即最高层级）对应于通常被称为预训练的学习阶段。因此，预训练是其中一个层级，具有其自身的上下文流（即预训练数据集）、目标（例如下一个token预测）和优化过程（例如AdamW）。据此，可以将预训练解读为上下文学习的一个可能实例，其上下文即为整个预训练数据。
+
+> **预训练是具有超大上下文长度的上下文学习：**
+>
+> 从嵌套学习的视角来看，预训练只是上下文学习的一个可能实例，其上下文即为整个预训练数据。模型中训练时间和测试时间的区分，是将知识迁移过程从最高频率层级（例如Transformer的上下文）到低频率层级（即预训练）断开的结果。
+
+这种表述和视角在我们从预训练范式转向能够持续与数据/世界交互并从中学习的模型时（例如 Sutton（2025）），尤为重要：
+
+**持续学习。** 从嵌套学习的视角来看，模型的每个训练阶段被定义为低频层级之一，在设计上，我们可能希望在某个层级停止数据处理（例如"预训练结束"），或者在不向其他层级进行知识迁移的情况下继续处理（例如Transformer中上下文学习的传统表述）。因此，任何机器学习模型，无论是在预训练期间还是在测试时，都在执行持续学习，因为给定一个数据样本，它需要执行内部计算以提供输出。然而，该学习的知识可能不会持续或迁移到更持久的层级，这主要是由于层级之间缺乏知识迁移。
+
+> **神经学习模块中不存在训练时间或测试时间：**
+>
+> 对于神经学习模块而言，训练时间和测试时间之间没有明确的边界和清晰的区分。模型仅经历两种不同的状态：当它接收信息作为输入时，或当它是一个孤立的学习系统时。
+
+我们还在下文中重新审视了架构设计中的一些常见术语：
+
+**现有架构骨干与混合模型。** 如第5.1节先前所讨论的，从嵌套学习的视角来看，所有现代架构都是统一的，实际上都是前馈层（线性或非线性MLP模块），基于各自的上下文流和优化问题进行训练。当从深度学习视角观察模型时，我们看到的是这些优化问题的最终解（即我们看到的是注意力而非回归损失的非参数解），这产生了拥有不同且非统一架构的幻象。
+
+> **循环模型正在替代MLP模块：**
+>
+> 从嵌套学习的视角来看，（深层或线性记忆的）循环模型是在其内部计算中添加了新层级的MLP模块。因此，现有的混合模型可以被视为传统的Transformer模型，只是在其部分MLP模块中添加了新的计算层级。
+
+理解现有架构在其所谓"预训练"阶段的另一个重要方面，是理解它们如何在不同层级之间迁移知识。
+
+> **来自上下文学习的知识迁移**
+>
+> 虽然从联想记忆视角来看，现代深层和线性循环模型都可以被统一，但现有实例之间仍存在一个重要区别：深层记忆模块如Titans、Atlas、Miras和TTT通过元学习记忆的初始状态，利用了从高频层级到低频层级的知识迁移，而大多数线性记忆循环模型在其层级之间没有知识迁移过程。
+
+**神经学习模块作为互联系统。** 嵌套学习的一个关键信息是：神经学习模块是互联系统，这意味着每个组件的设计会显著影响其他部分的设计。这一事实激励后续和未来的研究去更好地理解如何正确设计一个所有组件协调工作的神经学习模块。作为一个例子，优化器的上下文（即梯度）由架构组件生成。因此，不同的架构可能在生成的梯度模式中表现出不同的特性，因而同一个优化器可能并非所有架构的最佳选择（Zhang et al. 2024b）。
+
+> **架构为优化器生成上下文**
+>
+> 神经学习模块是互联系统，其中架构为优化器生成上下文（即梯度）。因此，梯度的恰当记忆管理（即优化算法）依赖于架构的选择。未来，当将模型视为神经学习模块时，我们需要设计针对特定架构的优化器，使这个互联系统能够完美协调地工作。
+
+**优化器与学习型优化器。** 最后，我们想强调，我们对动量、梯度下降和/或其他基于梯度的优化器的表述表明，它们是联想记忆模块，旨在将数据和梯度压缩到其参数中。这种更新和压缩过程基于梯度下降，因此与学习型优化器（learned optimizer）的学习过程具有非常相似的本质。从嵌套学习的视角来看，传统优化器和学习型优化器都是同一概念的实例，只是频率和上下文流不同：学习型优化器的参数位于最低频率层级（即与其他参数一起在预训练中训练和优化），而传统优化器的参数位于其自身的层级，因而拥有其自身的梯度流。
+
+## 7 连续多时间尺度记忆系统
+
+现有的架构骨干由以下部分组成：(1) 工作记忆模块（例如注意力机制），负责在序列长度维度上主动融合信息；(2) 前馈层（例如MLP），在特征维度上融合信息，并充当预训练阶段的持久记忆或知识存储。从嵌套学习（NL）的视角来看，预训练是学习模块最外层在其有限的上下文流上进行更新的阶段。因此，在持续学习的设置中，这种预训练阶段也很少随时间更新，其对应的知识存储也需要很少被更新。基于这一直觉，我们扩展了传统的长期/短期记忆系统的观点，并为每个层级（频率域）建议一个知识存储前馈网络。
+
+### 7.1 连续记忆系统（Continuum Memory System, CMS）
+
+根据频率的定义（定义2），连续记忆系统（Continuum Memory System, CMS）被形式化为一系列MLP模块的链 $\text{MLP}^{(f_1)}(\cdot), \ldots, \text{MLP}^{(f_k)}(\cdot)$，每个模块关联一个分块大小 $C^{(\ell)} := \max\left(\frac{f_i^\ell}{C}\right)$，使得给定输入 $x = \{\boldsymbol{x}_1, \ldots, \boldsymbol{x}_T\}$，该链的输出计算如下（为清晰起见，我们省略了归一化操作）：
+
+$$
+\boldsymbol{y}_t = \text{MLP}^{(f_k)}\!\left(\text{MLP}^{(f_{k-1})}\!\left(\cdots \text{MLP}^{(f_1)}(\boldsymbol{x}_t)\right)\right), \tag{70}
+$$
+
+其中第 $\ell$ 个MLP模块的参数，即 $\boldsymbol{\theta}^{(f_\ell)}$，每隔 $C^{(\ell)}$ 步更新一次：
+
+$$
+\boldsymbol{\theta}_{i+1}^{(f_\ell)} = \boldsymbol{\theta}_{i}^{(f_\ell)} -
+\begin{cases}
+\displaystyle \eta_t^{(\ell)} \sum_{t=i-C^{(\ell)}}^{i} f\!\left(\boldsymbol{\theta}_t^{(f_\ell)};\, \boldsymbol{x}_t\right) & \text{if } i \equiv 0 \pmod{C^{(\ell)}}, \\[6pt]
+0 & \text{otherwise}.
+\end{cases}
+\tag{71}
+$$
+
+这里 $\eta_t^{(\ell)}$ 是对应于 $\boldsymbol{\theta}^{(f_\ell)}$ 的学习率，$f(\cdot)$ 是任意优化器的误差分量（例如，在梯度下降中为 $\nabla\mathcal{L}(\boldsymbol{\theta}_t^{(f_\ell)};\, \boldsymbol{x}_t)$）。传统的Transformer模块（Vaswani et al. 2017）是该公式的一个特例，其中 $k = 1$ 且更新频率为零。注意，$\mathcal{L}(\cdot)$ 的目标函数是当前任务选定的目标函数，例如，对于语言建模而言是下一个token预测目标。值得注意的是，公式71提供了一个重要的解释：参数 $\boldsymbol{\theta}_t^{(f_\ell)}$ 负责将其自身的上下文压缩到参数中，因此它们是其上下文的抽象知识的代表。
+
+如第3.3节所讨论的，不同层级可能有不同的知识迁移过程。因此，虽然上述公式化建议了在不同层级、不同频率下的一系列记忆系统，但它们之间的连接方式可以根据设计而有所不同。下面我们讨论一些可能的变体：
+
+**嵌套连续记忆系统（Nested Continuum Memory Systems）。** 第一种变体是完全嵌套的连续记忆系统，其中第 $s + 1$ 层级的MLP模块的初始状态在第 $s$ 层级中通过元学习获得。这种设计允许高阶上下文学习能力，每个层级都有自己的上下文流，并在上下文结束后重新初始化。更具体地说，给定任意的 $1 \leq s \leq k$，
+
+$$
+\boldsymbol{\theta}_0^{(f_{s+1})} = \arg\min_{\Phi}\; \mathbb{E}_{\mathcal{T} \sim \mathcal{C}^{(s)}}\left[\ell(\Theta, \mathcal{T};\, \Phi)\right], \tag{72}
+$$
+
+其中 $\mathcal{C}^{(s)}$ 是第 $s$ 层级MLP模块的上下文长度。按照这种设计，在每个模块的优化过程结束时（即经过 $\lceil C^{(s)} / C^{(s+1)} \rceil$ 步后），记忆的值将被重新初始化为 $\boldsymbol{\theta}_0^{(f_{s+1})}$。注意，每个模块在其自身层级中的更新机制保持不变（即公式71）。
+
+**顺序连续记忆系统（Sequential Continuum Memory Systems）。** 在第二种变体中，MLP模块按顺序排列（即第 $s$ 层级MLP模块的输出是第 $s + 1$ 层级MLP模块的输入），并且所有MLP模块的初始状态都通过最低频率层级中的反向传播相互连接。给定任意的 $1 \leq s \leq k$，
+
+$$
+\boldsymbol{\theta}_0^{(f_s)} = \arg\min_{\Phi}\; \mathbb{E}_{\mathcal{T} \sim \mathcal{C}^{(1)}}\left[\ell(\Theta, \mathcal{T};\, \Phi)\right], \tag{73}
+$$
+
+其中 $\mathcal{C}^{(1)}$ 是最低频率层级中MLP模块的上下文长度。由于所有记忆的初始状态都在最低频率层级中进行元学习，因此所有组件中最持久的知识是对同一上下文流的压缩。
+
+**独立（逐头）连续记忆系统（Independent (Head-wise) Continuum Memory Systems）。** 在这种变体中，我们保留公式73中的知识迁移过程，但改变公式70中的输出计算。前述公式将记忆系统设计为一系列模块的序列，使得它们的输入/输出相互依赖；而这种变体使用具有不同上下文长度的独立模块，然后通过聚合过程将它们组合起来：
+
+$$
+\boldsymbol{y}_t = \text{Agg}\!\left(\text{MLP}^{(f_k)}(\boldsymbol{x}_t),\; \text{MLP}^{(f_{k-1})}(\boldsymbol{x}_t),\; \cdots,\; \text{MLP}^{(f_1)}(\boldsymbol{x}_t)\right). \tag{74}
+$$
+
+上述 $\text{Agg}(\cdot)$ 是一个任意函数，用于聚合所有输入以计算输出。例如，一种简单直接的设计选择是使用输入的可学习加权求和。
+
+**CMS设计有助于持续学习。** 基于CMS的设计，一个合理的问题是：为什么以及如何CMS能够帮助处理更长的上下文长度以及更一般的持续学习。这里我们给出一个简单的回答：将CMS中的MLP模块视为模型知识的存储，当我们更新一个模块时，灾难性遗忘（catastrophic forgetting）可能会发生，因为其参数中存储的旧知识会被遗忘。然而，在CMS设计中，当更新任意一个 $\text{MLP}^{(f_s)}(\cdot)$（对于某个 $1 \leq s \leq k$）时，从 $\text{MLP}^{(f_s)}(\cdot)$ 中可能遗忘的知识仍然存储在其他组件中，例如 $\text{MLP}^{(f_{s'})}(\cdot)$，其中 $s' < s$。此外，在这种情况下（即知识已从 $\text{MLP}^{(f_s)}(\cdot)$ 中遗忘，但仍保留在 $\text{MLP}^{(f_{s'})}(\cdot)$ 中，$s' < s$），通过反向传播（对其初始状态）进行的知识迁移可以将知识重新传递回 $\text{MLP}^{(f_s)}(\cdot)$，从而在时间维度上形成一个循环，使得重要知识很难被遗忘。
+
+**CMS是否足够高效？** 以持续方式更新模型参数时，一个常见的担忧是其效率。因此，一个合理的问题是CMS是否会给模型带来显著的计算开销。为了回答这个问题，让我们回顾第5节的内容：现代循环神经网络也在持续更新其参数的一个子集（即它们的记忆状态）。然而，这些参数更新利用了序列并行化以及仅更新少量参数的优势。为此，对于CMS，我们强调两点：
+
+- 在CMS设计中，每个时刻的更新仅限于接近其计划更新时间（基于其频率）的模块。作为一个简单的例子，考虑一个Transformer，但将其MLP模块替换为CMS（后文第8节中将此变体称为Hope-Attention）。设模型有 $L_{\text{layer}}$ 层，CMS中有4个层级的MLP模块，最高频率为 $\hat{f}$，隐藏维度为 $d_{\text{in}}$。平均而言，更新代价涉及 $\mathcal{O}\!\left(\frac{1}{\hat{f}} \times \frac{L_{\text{layer}}}{5} \times d_{\text{in}}^2\right)$ 个参数，这在每个时刻仅包含少量参数。
+
+- 公式71的更新机制不仅有助于增强模型的持久记忆，还解锁了高频率层级的序列并行化。更具体地说，对于输入 $\boldsymbol{x}_i$，当 $i \not\equiv 0 \pmod{C^{(\ell)}}$ 时，分块内部没有顺序处理过程，因此对应于不同 $i \not\equiv 0 \pmod{C^{(\ell)}}$ 值的所有token的计算都可以并行完成。这种训练算法的细节与Sun et al. (2024) 和 Behrouz et al. (2025c) 中的训练过程相同。
+
+因此，总而言之，CMS在实践中可以很快，这主要归功于它每次仅更新少量参数，以及其设计解锁了序列并行化。
+
+### 7.2 优化器中的连续记忆系统
+
+作为概念验证以及为了支持CMS在不同上下文流中的有效性，在本节中我们提出了多尺度动量/记忆Muon（Multi-scale Momentum/Memory Muon, M3）优化器。具体来说，我们旨在利用NL的联想记忆视角来设计一个优化器，它不仅能有效压缩最近的梯度，还具有纳入长期过去梯度信息的能力。在附录B（公式101）中，我们讨论了Adam优化器如何作为联想记忆的一个实例，其中梯度被映射到截至该时刻的方差。根据第4.3节中关于优化器长上下文能力需求的讨论，我们首先将公式102中 $H$ 项的简单联想记忆公式替换为我们的CMS（独立变体，公式74），采用两级记忆系统，我们将这些记忆分别称为 $\boldsymbol{M}^{(1)}$ 和 $\boldsymbol{M}^{(2)}$：
+
+$$
+\boldsymbol{M}_t^{(1)} = \boldsymbol{M}_{t-1}^{(1)} + \beta_1 \boldsymbol{g}_t, \tag{75}
+$$
+
+$$
+\boldsymbol{M}_t^{(2)} = \boldsymbol{M}_{t}^{(2)} -
+\begin{cases}
+\displaystyle \beta_2 \sum_{i=t-\hat{C}}^{t} \boldsymbol{g}_i & \text{if } t \equiv 0 \pmod{\hat{C}}, \\[6pt]
+0 & \text{otherwise},
+\end{cases}
+$$
+
+其中 $\hat{C}$ 是我们更新低频率动量项的分块大小。最后，为了聚合动量项（公式74中 $\text{Agg}(\cdot)$ 的选择），我们使用简单的加权求和，参数 $\alpha > 0$ 作为 $\boldsymbol{M}_t^{(2)}$ 的系数。根据我们关于 $\text{Newton-Schulz}_T(\cdot)$ 在将梯度映射到适当度量空间方面重要性的讨论（见第4.2节和公式43），我们遵循Muon（Jordan et al. 2024），在动量项的输出上使用 $\text{Newton-Schulz}_T(\cdot)$，然后通过加权求和进行聚合。这有助于联想记忆通过在适当方向上更新其参数来更好地管理其容量。M3的伪代码见算法1。总结来说，可以说M3是Adam（Kingma et al. 2014a）、Muon（Jordan et al. 2024）和我们的连续记忆系统的结合。
+
+> **算法1：** 多尺度动量Muon（Multi-scale Momentum Muon, M3）
+>
+> **Input:** 初始权重 $\boldsymbol{\Theta}_0$，目标函数 $\mathcal{L}(\cdot)$，学习率 $\eta > 0$，Newton-Schulz步数 $T$，动量因子 $1 > \beta_1, \beta_2, \beta_3, \alpha \geq 0$，$\epsilon > 0$，频率 $f$
+>
+> 1. 初始化动量：$\boldsymbol{M}_0^{(1)}, \boldsymbol{M}_0^{(2)} \leftarrow 0$，$\boldsymbol{V}_0 \leftarrow 0$
+> 2. **for** 低频率迭代 $k = 0, 1, 2, \ldots$ **do**
+> 3. $\quad$ 慢记忆：$\boldsymbol{M}_t^{(2)} = \boldsymbol{M}_{t-1}^{(2)} + \beta_3 \sum_{i=(k-1)f}^{kf} \boldsymbol{g}_i$
+> 4. $\quad$ $\boldsymbol{O}_t^{(2)} \leftarrow \text{Newton-Schulz}_T\!\left(\boldsymbol{M}_t^{(2)}\right)$
+> 5. $\quad$ **for** $t = kf + 1,\; kf + 2,\; \ldots,\; (k+1)f$ **do**
+> 6. $\quad\quad$ 计算梯度：$\boldsymbol{g}_t = \nabla_{\boldsymbol{\Theta}_t} \mathcal{L}(\boldsymbol{\Theta}_t)$
+> 7. $\quad\quad$ 第一动量：$\boldsymbol{M}_t^{(1)} = \boldsymbol{M}_{t-1}^{(1)} + \beta_1 \boldsymbol{g}_t$
+> 8. $\quad\quad$ 第二动量：$\boldsymbol{V}_t = \boldsymbol{V}_{t-1} + \beta_2 \boldsymbol{g}_t^2$
+> 9. $\quad\quad$ $\boldsymbol{O}_t^{(1)} \leftarrow \text{Newton-Schulz}_T\!\left(\boldsymbol{M}_t^{(1)}\right)$
+> 10. $\quad\quad$ $\boldsymbol{\Theta}_t \leftarrow \boldsymbol{\Theta}_{t-1} - \eta \,\dfrac{\boldsymbol{O}_t^{(1)} + \alpha\, \boldsymbol{O}_t^{(2)}}{\sqrt{\boldsymbol{V}_t} + \epsilon}$
+> 11. $\quad$ **end for**
+> 12. **end for**
+
+值得注意的是，该优化器是作为概念验证而设计的，旨在支持CMS的设计。然而，M3优化器本身可能存在计算开销的问题，因此在扩展到更大网络时面临挑战（见图12）。此外，值得注意的是，基于CMS的M3设计的要点在于延迟记忆更新以获得更长的上下文。类似的研究如Devan Selvaraj (2025) 和 Pagliardini et al. (2025) 的工作，虽然也使用多个动量项，但通过对额外动量项使用受控学习率来实现优化器的长上下文动量。
+
+### 7.3 即插式层级堆叠（Ad-hoc Level Stacking）：用预训练模型初始化CMS
+
+在我们对图3的讨论中，我们观察到记忆模块的初始状态在较低频率层级中被优化，因此可以将它们解释为原始Transformer架构（Vaswani et al. 2017）中的MLP模块。因此，一个自然的问题是我们是否可以利用预训练模型来初始化CMS模块。NL的一个重要优势是其在不同层级中查看和修改参数的灵活性。也就是说，由于每个层级都有自己的上下文流和优化过程，可以简单地独立初始化每个层级的参数，以帮助模型更快地适应该层级的上下文流。为此，在本节中，我们建议使用模型的预训练权重来初始化某一层级的参数。更正式地说，给定一个CMS $\{\text{MLP}^{(f_i)}(\cdot)\}_{i=1}^{k}$ 和一组预训练的MLP模块 $\{\text{MLP}_{\text{pre-trained}_i}(\cdot)\}_{i=1}^{k}$，我们使用公式71在不同层级中更新 $\{\text{MLP}^{(f_i)}(\cdot)\}_{i=1}^{k}$；然而，我们使用 $\{\text{MLP}_{\text{pre-trained}_i}(\cdot)\}_{i=1}^{k}$ 的训练参数作为CMS模块的初始状态：$\text{MLP}_0^{(f_i)}(\cdot) = \text{MLP}_{\text{pre-trained}_i}(\cdot)$。
+
+> **图5：** Hope架构骨干与Transformer的比较（为清晰起见，归一化和潜在的数据依赖组件已被省略）。
+
+**为什么这种初始化应该有效？** 在NL中，当两个层级之间存在知识迁移过程时，较高频率的层级可以利用存储在较低频率层级中的知识，从而更快地适应其自身的上下文流。然而，较高频率层级中的内部学习率可以控制模型的适应能力。即考虑上述情况，当所有模块都用预训练的MLP模块初始化时，设置 $\eta_t^{(\ell)} \to 0$ 会使更新后的记忆模块保持接近其初始状态，从而直接使用预训练模块而不进行适应。后文第9节中，我们使用这种方法将预训练的Transformer架构适配到Hope的设置中。
+
+## 8 Hope：一种具有连续记忆的自引用学习模块
+
+正如我们在第5.1节中讨论的，嵌套学习中的架构是统一的（uniform），即一组前馈神经网络模块，每个模块都有自己的上下文、更新频率和内部目标函数。序列模型——一个常用术语，指的是通常具有最高更新频率的模块，用于在输入序列的token之间融合信息——是模型记忆管理和上下文学习能力的关键组件。根据我们在第5节中早先的讨论，现代序列模型可以被视为联想记忆，因此是嵌套优化问题。从这个视角来看，全局softmax注意力或其更具表达力的高阶变体是完美记忆（强制缓存所有过去的token），更新频率为无穷大，因为它们是使用Nadaraya-Watson估计器（Fan 2018; Zhang et al. 2022）优化（局部）$L_2$回归目标的非参数解（见公式62）。因此，对于类似目标的参数化解（例如，现代RNN），当参数搜索空间相同（即矩阵值记忆）时，当模型规模和数据扩展时，它们不应被期望超越softmax注意力。为此，要设计强大的序列模型，我们需要理解Transformer的局限性以及如何克服这些局限性。
+
+从嵌套学习的视角来看，Transformer是两级组件，其中投影和MLP模块在第一级中优化，第二级负责通过寻找非参数解进行上下文学习，从而将输出调节在上下文之上。然而，这种设计的计算深度有限，正如近期关于状态跟踪和模型类似计算能力的研究所述（Merrill et al. 2024; Sanford et al. 2024; Grazzi et al. 2025）。此外，Transformer的参数在其整个上下文中是静态的，这意味着它们找到的将上下文中token进行映射的解（由于是非参数解）保持不变，因此缺乏自我修改（self-modification）的能力（至少在上下文中）。更具体地说，初始的线性模块 $W_{\mathbf{k}}$、$W_{\mathbf{v}}$ 和 $W_{\mathbf{q}}$，即将输入数据投影为键、值和查询的模块，在预训练阶段后是固定的（即处于第一级），因此Transformer上下文化和映射token的能力受限于这些模块中存储的知识。例如，给定一个1层的Transformer，每个token的投影是该token本身及其位置的函数；因此，作为一个例子，它可能无法捕捉到那些含义取决于上下文而非词本身的词的多样化可能编码。尽管随着模型深度的增加，这个问题在后续层中可能会减弱，但我们不应依赖深度来补偿模型的能力，因为它仍然是释放模型在早期层能力的瓶颈。
+
+为了克服上述挑战，近来短卷积和canon层（Allen-Zhu 2025）的使用已成为现代模型中事实上的标准组件。尽管它们在混合局部token方面取得了成功，但模型在适应上下文和捕获超越局部混合的全局信息方面仍然从根本上受限。在下一部分中，我们通过提出自引用Titans（self-referential Titans）来讨论一种根本性的解决方案，使所有组件都能进行上下文学习，并适应和修改自身：
+
+### 8.1 深度自引用Titans（Deep Self-Referential Titans）
+
+基于联想记忆模块的一般公式是将数据投影为键、值和查询，学习如何将键映射到值，以及如何基于查询从映射中检索信息。更正式地说，对于参数化联想记忆，设 $\mathbf{x}_t \in \mathbb{R}^d$（$t = 1, \ldots, L$）为输入，我们有：
+
+$$
+\mathbf{k}_t = \mathbf{x}_t W_{\mathbf{k}}, \quad \mathbf{v}_t = \mathbf{x}_t W_{\mathbf{v}}, \quad \mathbf{q}_t = \mathbf{x}_t W_{\mathbf{q}}, \quad \eta_t = \mathbf{x}_t W_{\eta}, \quad \alpha_t = \mathbf{x}_t W_{\alpha}, \tag{76}
+$$
+
+$$
+\min_{\mathbf{M}} \mathcal{L}(\mathbf{M}; \mathbf{k}_t, \mathbf{v}_t), \quad \text{with an optimization algorithm} \tag{77}
+$$
+
+$$
+\mathbf{y}_t = \mathbf{M}_t \mathbf{q}_t. \tag{78}
+$$
+
+为了清晰起见，我们使用红色（或蓝色）来标注上层（或下层）中的计算/权重。类似于图3中的示例，我们可以为 $W_{\mathbf{k}}$、$W_{\mathbf{v}}$、$W_{\mathbf{q}}$、$W_{\eta}$ 和 $W_{\alpha}$ 中的每一个添加一个新层级，并允许它们在上下文中被更新。为了效率起见，一个简单的版本是在嵌套联想记忆系统中共享所有组件的值：
+
+$$
+\mathbf{k}_t = \mathbf{M}_{\mathbf{k},t-1}(\mathbf{x}_t), \quad \mathbf{v}_t = \mathbf{M}_{\mathbf{v},t-1}(\mathbf{x}_t), \quad \eta_t = \mathbf{M}_{\eta,t-1}(\mathbf{x}_t), \quad \alpha_t = \mathbf{M}_{\alpha,t-1}(\mathbf{x}_t), \tag{79}
+$$
+
+$$
+\mathbf{q}_t = \mathbf{M}_{\mathbf{q},t-1}(\mathbf{x}_t), \tag{80}
+$$
+
+$$
+\min_{\mathbf{M}_{\square}} \mathcal{L}(\mathbf{M}_{\square}; \square_t, \mathbf{v}_t), \quad \text{with an optimization algorithm}, \quad \square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha\}, \tag{81}
+$$
+
+$$
+\min_{\mathbf{M}_{\text{mem}}} \mathcal{L}(\mathbf{M}_{\text{mem}}; \mathbf{k}_t, \mathbf{v}_t), \quad \text{with an optimization algorithm}, \tag{82}
+$$
+
+$$
+\mathbf{y}_t = \mathbf{M}_{\text{mem},t}(\mathbf{q}_t), \tag{82}
+$$
+
+其中所有记忆的初始状态，即任意 $\square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha, \text{memory}\}$ 对应的 $\mathbf{M}_{\square,0}$，在所有序列/上下文中通过元学习获得。如前所述，记忆初始状态的元学习对于快速适应、训练稳定性和对数据噪声的鲁棒性至关重要。
+
+这种设计提供了一个完全自适应的记忆，所有组件都可以在上下文中自适应。然而，它 (1) 仍然缺乏自修改（self-modification）能力，即模型响应新数据而改变自身参数或学习过程（Schmidhuber 2003）；(2) 设计次优，因为它为所有记忆共享键和值。在持续学习中，模型需要响应新数据持续进行权重/知识更新，模型不能仅依赖于数据，而需要学会在需要时修改自身，这一点至关重要。基于上述要点，并受到根据上下文生成自身值的自修改机制的启发（Schmidhuber 1993, 2003; Irie et al. 2022b），我们提出了自修改深度联想记忆（self-modifying deep associative memory），其中模型生成自身的值：
+
+$$
+\mathbf{y}_t = \mathbf{M}_{\text{memory},t-1}(\mathbf{q}_t), \tag{83}
+$$
+
+$$
+\mathbf{k}_t = \mathbf{M}_{\mathbf{k},t-1}(\mathbf{x}_t), \quad \mathbf{v}_t = \mathbf{M}_{\mathbf{v},t-1}(\mathbf{x}_t), \quad \eta_t = \mathbf{M}_{\eta,t-1}(\mathbf{x}_t), \quad \alpha_t = \mathbf{M}_{\alpha,t-1}(\mathbf{x}_t), \tag{83}
+$$
+
+$$
+\hat{\mathbf{v}}_{\square,t} = \mathbf{M}_{\square,t-1}(\mathbf{v}_t), \quad \text{（为每个记忆生成自身的值）} \tag{84}
+$$
+
+$$
+\min_{\mathbf{M}_{\square}} \mathcal{L}\left(\mathbf{M}_{\square}; \mathbf{k}_t, \hat{\mathbf{v}}_{\square,t}\right), \quad \text{with an optimization algorithm}, \quad \square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha, \text{memory}\}, \tag{85}
+$$
+
+其中 $\mathbf{q}_t = \mathbf{x}_t W_{\mathbf{q}}$ 是唯一的非自适应投影，$\eta_t$ 是优化过程中的学习率，$\alpha_t$ 是优化过程中的保留门（遗忘门或权重衰减）。注意，同样地，所有记忆的初始状态，即任意 $\square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha, \text{memory}\}$ 对应的 $\mathbf{M}_{\square,0}$，在所有序列/上下文中通过元学习获得，因此在更高层级（或外循环）中被优化。
+
+学习联想记忆模块的映射（见公式85）需要选择优化算法以及衡量映射质量的目标函数 $\mathcal{L}$。目标函数和优化过程的一个简单且常见的选择是 $L_2$ 回归损失和梯度下降算法。对于目标函数，我们使用 $L_2$ 回归损失，即 $\mathcal{L}(\mathbf{M}; \mathbf{k}, \mathbf{v}) = \|\mathbf{M}(\mathbf{k}) - \mathbf{v}\|_2^2$。如前所述（见第4.5节），优化器的选择在很大程度上取决于优化的上下文。例如，从联想记忆的角度来看，梯度下降基于点积相似度（dot-product similarity），因此每步的更新仅基于输入，而不将先前的数据样本纳入更新。然而，在token空间中进行优化时，我们知道token之间具有高度相关性。因此，根据我们在第4.5节中的讨论，我们使用带有权重衰减（weight decay）的DGD，得到如下一般更新规则：
+
+$$
+\mathbf{y}_t = \mathbf{M}_{\text{memory},t-1}(\mathbf{q}_t), \tag{86}
+$$
+
+$$
+\mathbf{k}_t = \mathbf{M}_{\mathbf{k},t-1}(\mathbf{x}_t), \quad \mathbf{v}_t = \mathbf{M}_{\mathbf{v},t-1}(\mathbf{x}_t), \quad \eta_t = \mathbf{M}_{\eta,t-1}(\mathbf{x}_t), \quad \alpha_t = \mathbf{M}_{\alpha,t-1}(\mathbf{x}_t), \tag{86}
+$$
+
+$$
+\hat{\mathbf{v}}_{\square,t} = \mathbf{M}_{\square,t-1}(\mathbf{v}_t), \quad \text{（为每个记忆生成自身的值）} \tag{87}
+$$
+
+$$
+\mathbf{M}_{\square,t} = \mathbf{M}_{\square,t-1}\left(\alpha_t \mathbf{I} - \eta_t \mathbf{k}_t \mathbf{k}_t^{\top}\right) - \eta_t \nabla_{\mathbf{M}_{\square,t-1}} \mathcal{L}\left(\mathbf{M}_{\square,t-1}; \mathbf{k}_t, \hat{\mathbf{v}}_{\square,t}\right), \quad \square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha, \text{memory}\}. \tag{88}
+$$
+
+这里，记忆的架构是任意的，我们甚至不必对所有组件使用相同的架构。我们使用2层MLP模块作为所有记忆的架构：
+
+$$
+\mathbf{M}_{\square}(\cdot) = (\cdot) + W_{\square,1} \sigma(W_{\square,2}(\cdot)). \tag{89}
+$$
+
+### 8.2 快速且可并行化的训练
+
+在上文中，我们讨论了如何设计一个能够学习生成自身潜在值并自我修改的模型。从实际角度来看，主要的挑战是方法的效率以及其训练是否可并行化。我们遵循非线性更新规则的分块训练（chunk-wise training）算法（Sun et al. 2024; Behrouz et al. 2025c），使用更新频率 $f_{\square} = \frac{L}{C_{\square}}$，其中 $L$ 是上下文长度。虽然使用不同的分块大小没有限制，但在我们的实验中，我们使用两种不同的分块大小值，一种用于 $\mathbf{M}_{\text{memory}}(\cdot)$ 的更新，另一种用于自引用Titans中所有其他记忆的更新。
+
+更详细地说，给定输入序列 $\{\mathbf{x}_t\}_{t=1}^{L}$ 和分块大小 $1 \leq C \leq L$，我们将序列分割为 $\lceil \frac{L}{C} \rceil$ 个块 $\{\mathbf{x}_{(i-1)C+t}\}_{t=1}^{C}$（$i = 1, \ldots, \lceil \frac{L}{C} \rceil$），然后在每个块结束时为下一个块生成公式86中的所有元素。这允许在开始当前块的计算之前，并行生成整个块的所有元素。此外，为了根据公式88更新记忆模块，我们对前一个块的最后状态求梯度。同样，这允许并行计算下一个块的所有梯度。更详细地说，给定这种分块更新过程，自引用Titans的更新规则计算如下：
+
+$$
+\mathbf{y}_t = \mathbf{M}_{\text{memory}, C \times \lceil \frac{t}{C} \rceil}(\mathbf{q}_t), \tag{90}
+$$
+
+$$
+\mathbf{k}_t = \mathbf{M}_{\mathbf{k}, C \times \lceil \frac{t}{C} \rceil}(\mathbf{x}_t), \quad \mathbf{v}_t = \mathbf{M}_{\mathbf{v}, C \times \lceil \frac{t}{C} \rceil}(\mathbf{x}_t), \quad \eta_t = \mathbf{M}_{\eta, C \times \lceil \frac{t}{C} \rceil}(\mathbf{x}_t), \quad \alpha_t = \mathbf{M}_{\alpha, C \times \lceil \frac{t}{C} \rceil}(\mathbf{x}_t),
+$$
+
+$$
+\hat{\mathbf{v}}_{\square,t} = \mathbf{M}_{\square, C \times \lceil \frac{t}{C} \rceil}(\mathbf{v}_t), \quad \text{（为每个记忆生成自身的值）}
+$$
+
+$$
+\mathbf{M}_{\square,t} = \mathbf{M}_{\square,t-1}\left(\alpha_t \mathbf{I} - \eta_t \mathbf{k}_t \mathbf{k}_t^{\top}\right) - \eta_t \nabla_{\mathbf{M}_{\square, C \times \lceil \frac{t}{C} \rceil}} \mathcal{L}\left(\mathbf{M}_{\square, C \times \lceil \frac{t}{C} \rceil}; \mathbf{k}_t, \hat{\mathbf{v}}_{\square,t}\right), \quad \square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha, \text{memory}\}. \tag{90}
+$$
+
+这里，记忆的架构是任意的，我们甚至不必对所有组件使用相同的架构。我们使用2层MLP模块作为所有记忆的架构：
+
+$$
+\mathbf{M}_{\square}(\cdot) = (\cdot) + W_{\square,1} \sigma(W_{\square,2}(\cdot)). \tag{91}
+$$
+
+由于所有梯度以及新的键、值、学习率和权重衰减都可以在开始处理当前块之前并行计算，上述更新接受Sun et al. (2024) 和 Behrouz et al. (2025c) 所讨论的快速可并行化对偶形式。为了更好地说明上述自引用Titans的更新规则，让我们推导最简单情况——矩阵值记忆——的递推公式。我们为两种不同的目标函数推导递推形式：
+
+- **点积相似度（dot-product similarity）** $\mathcal{L}(\mathbf{M}; \mathbf{k}, \mathbf{v}) = -\langle \mathbf{M}\mathbf{k}, \mathbf{v} \rangle$：给定该目标函数和线性记忆，梯度计算为 $\mathbf{v}\mathbf{k}^{\top}$，由此得到更新规则：
+
+$$
+\mathbf{M}_{\square,t} = \mathbf{M}_{\square,t-1}\left(\alpha_t \mathbf{I} - \eta_t \mathbf{k}_t \mathbf{k}_t^{\top}\right) - \eta_t \hat{\mathbf{v}}_{\square,t} \mathbf{k}_t^{\top}, \quad \square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha, \text{memory}\} \tag{92}
+$$
+
+- **$L_2$ 回归损失**：给定该目标函数和线性记忆，梯度计算为 $(\mathbf{M}\mathbf{k} - \mathbf{v})\mathbf{k}^{\top}$，由此得到更新规则：
+
+$$
+\mathbf{M}_{\square,t} = \mathbf{M}_{\square,t-1}\left(\alpha_t \mathbf{I} - \eta_t \mathbf{k}_t \mathbf{k}_t^{\top}\right) - \eta_t \left(\mathbf{M}_{\square, C \times \lceil \frac{t}{C} \rceil} \mathbf{k}_t - \hat{\mathbf{v}}_{\square,t}\right) \mathbf{k}_t^{\top}, \quad \square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha, \text{memory}\}. \tag{93}
+$$
+
+### 8.3 Hope神经学习模块
+
+在前面的章节中，我们首先讨论了连续记忆系统（CMS），它允许更持久地存储记忆，并将记忆定义为具有不同更新频率的模块谱系。由于更大的容量和参数扩展的约束，CMS通常需要简单的学习规则但更高的容量来存储更持久的知识。另一方面，在上一节中，我们讨论了自修改Titans的设计，它可以生成自己的键，从而学习更新规则以更好地适应上下文。与CMS相反，自修改Titans容量较小但使用复杂且富有表达力的学习规则。因此，这两个系统似乎是互补的，它们的组合可以从不同方面增强模型的表达能力。
+
+为此，我们提出了Hope架构：一种将自修改Titans与连续记忆系统相结合的神经学习模块。Hope的设计如图5所示。形式化地，设 $\mathbf{x}_t \in \mathbb{R}^d$（$t = 1, \ldots, L$）为输入，Hope的前向传播定义如下（为清晰起见，我们省略了归一化层和卷积层）：
+
+$$
+\mathbf{o}_t = \mathbf{M}_{\text{memory},t-1}(\mathbf{q}_t), \tag{94}
+$$
+
+$$
+\mathbf{k}_t = \mathbf{M}_{\mathbf{k},t-1}(\mathbf{x}_t), \quad \mathbf{v}_t = \mathbf{M}_{\mathbf{v},t-1}(\mathbf{x}_t), \quad \eta_t = \mathbf{M}_{\eta,t-1}(\mathbf{x}_t), \quad \alpha_t = \mathbf{M}_{\alpha,t-1}(\mathbf{x}_t), \tag{94}
+$$
+
+$$
+\hat{\mathbf{v}}_{\square,t} = \mathbf{M}_{\square,t-1}(\mathbf{v}_t), \quad \text{（为每个记忆生成自身的值）} \tag{95}
+$$
+
+$$
+\mathbf{M}_{\square,t} = \mathbf{M}_{\square,t-1}\left(\alpha_t \mathbf{I} - \eta_t \mathbf{k}_t \mathbf{k}_t^{\top}\right) - \eta_t \nabla_{\mathbf{M}_{\square,t-1}} \mathcal{L}\left(\mathbf{M}_{\square,t-1}; \mathbf{k}_t, \hat{\mathbf{v}}_{\square,t}\right), \quad \square \in \{\mathbf{k}, \mathbf{v}, \mathbf{q}, \eta, \alpha, \text{memory}\}. \tag{96}
+$$
+
+$$
+\mathbf{y}_t = \text{MLP}^{(f_k)}\left(\text{MLP}^{(f_{k-1})}\left(\cdots \text{MLP}^{(f_1)}(\mathbf{o}_t)\right)\right), \tag{97}
+$$
+
+其中该模块对token $t$ 的输出为 $\mathbf{y}_t$。在我们的实验中，我们还对 $\mathbf{q}$ 和 $\mathbf{k}$ 使用 $L_2$ 归一化，并使用窗口大小为4的局部卷积。
+
+> **图5：** Hope架构骨干与Transformer的比较（为清晰起见，归一化和潜在的数据依赖组件已被省略）。
+
+**Hope-Attention。** 我们还使用了Hope的另一种变体，其中我们简单地将自修改Titans替换为softmax全局注意力（Vaswani et al. 2017）。
+## 9 实验
+
+在本节中，我们对论文中讨论的不同组件的性能进行了实证评估。具体而言：(1) 我们首先关注所提出的优化算法，并将其与最先进的方法进行比较；(2) 然后关注上下文学习（in-context learning）和持续学习（continual learning）任务，展示嵌套学习范式，尤其是高阶上下文学习如何增强模型的能力。我们将连续体记忆系统（Continuum Memory System）与简单的MLP层进行比较，并讨论如何将预训练模型适配为持续学习器；(3) 随后关注Hope模型的语言建模和长上下文理解能力，并将其与Transformer和现代循环架构进行比较。实验的详细设置在相应的章节中说明。
+
+---
+
+### 9.1 Hope：持续学习与长上下文理解
+
+嵌套学习（NL）的主要目标之一是增强持续学习能力，因此在本节中，我们在多个持续学习和长上下文理解任务上评估NL及其衍生方法，包括连续体记忆系统（CMS）和Hope。对于每个任务，我们使用该基准测试上已报告的最佳结果作为基线。
+
+**类增量学习（Class Incremental Learning）。** 首先，我们关注三个数据集上的类增量学习任务：
+
+- **CLINC** (Larson et al. 2019)：CLINC是一个面向任务导向对话系统的多领域意图分类基准测试，特别关注检测超出范围（OOS）的查询。它包含150个范围内意图类别，涵盖10个大类领域（如银行、旅行、家居、天气、闲聊等），共有23.7K条查询，其中22.5K为范围内查询，1.2K为范围外查询。
+- **Banking** (Casanueva et al. 2020)：Banking数据集是一个单领域意图分类基准测试，专注于银行领域的细粒度客户服务查询。在该数据集中，每个样本是一条简短的客户查询（例如"How can I reset my card PIN?"），需要被分类到正确的银行意图/类别中。共有3083个样本，标注了77种意图（类别严重不平衡）。
+- **DBpedia** (Auer et al. 2007)：DBpedia是一个来自维基百科的文本分类基准测试，其中文章摘要需要被归类到本体论主题类别中。换言之，给定一段简短的维基百科描述，目标是预测其高层主题/类别（例如该文章是关于书籍、电影、动物还是地点等）。该数据集包含超过340K个样本，标注了70个二级类别，但我们从中采样了10K训练样本和1K测试样本用于70类DBpedia任务。
+
+作为Hope模型的骨干网络，我们使用Llama3-8B和Llama-3B (Dubey et al. 2024)，然后采用第7.3节中讨论的技术使MLP块具备适应能力，将其置于不同层级并设置不同的更新频率，随后使用150亿词元（token）进行持续预训练。参照Momeni et al. (2025)的方法，我们使用Llama-3模型的简单上下文学习（ICL）能力（采用相同的150亿词元持续预训练流程，但不改变MLP块）、弹性权重巩固（EWC）(Kirkpatrick et al. 2017)以及带有外部学习器的上下文持续学习（InCA）(Momeni et al. 2025)作为评估基线。结果如图6所示。Hope在所有持续学习基线中表现最佳，包括带有外部学习器的模型（即InCA）。将Hope与ICL进行比较，主要差异来自Hope的多层级上下文学习（或等价地，MLP块的不同更新频率），这表明CMS设计在增强持续学习能力方面的有效性。此外，Hope相较于InCA和EWC的优越性能表明，层级间的知识迁移在模型性能中起着关键作用。
+
+> **图6：** 文本分类领域的类增量学习结果。（左）CLINC数据集 (Larson et al. 2019)，（中）Banking数据集 (Casanueva et al. 2020)，（右）DBpedia数据集 (Auer et al. 2007)。Hope增强的架构在所有持续学习方法中取得了最佳准确率，包括ICL。
+
+**层级对上下文学习的影响。** 尽管在上述任务中使用CMS已展现出改进，但为了更好地理解和评估层级及其频率对模型上下文学习能力的影响，我们进行了上下文问答和多键长上下文理解实验。具体而言，我们使用：
+
+- **LongHealth** (Adams et al. 2025)：这是一个长上下文临床问答基准测试，包含基于大量虚构患者记录的多项选择问答任务，用于测试大语言模型从详细医疗文档中提取信息和推理的能力。该数据集包含20份综合性患者病例文档（涵盖多种疾病），每份约5.1K–6.8K词，我们从患者记录中采样了200个问题。
+- **QASPER** (Dasigi et al. 2021)：该基准测试是一个以完整NLP研究论文为中心的信息检索式问答数据集。具体而言，它包含约5K个问答对，涵盖约1.6K篇NLP研究论文。我们使用每篇论文的全文作为模型的上下文。
+- **MK-NIAH** (Hsieh et al. 2024)：我们使用RULER (Hsieh et al. 2024)中的多键大海捞针（Needle-In-A-Haystack）任务。该设置要求模型不仅能定位，还能提取分布在长文本中的多条信息。
+
+作为基线，我们使用ICL（即仅有1级记忆的Hope）以及DuoAttention (Xiao et al. 2025)。值得注意的是，Cartridges (Eyuboglu et al. 2025)等方法已展现出有前景的性能，甚至优于DuoAttention，有时也优于ICL。然而，我们在此排除了它们与Hope的比较，主要原因是Hope具有更高的内存占用，且两者在计算成本上存在根本差异（如自学习等），需要在未来的研究中进行更加仔细和受控的实验设计。对于我们模型的变体，我们使用不同数量的记忆层级和不同的频率，按最低频率进行分组。注意，最低频率的记忆对应于模型最持久的记忆，因此我们预期具有更高最低频率的模型具有更强的适应性。
+
+结果如图7所示。具有任意数量层级和任意最低频率的Hope均优于ICL基线以及高效的DuoAttention。此外，比较Hope的各个变体，结果表明：(1) 更多的记忆层级有助于提升模型的上下文学习能力，并增强其长期记忆和长上下文理解能力；(2) 最低频率越高，性能越低。如上所述，最低频率的记忆是模型最持久的记忆，因此增加其频率意味着模型拥有更弱但更具适应性的长期记忆。由于更新频率直接影响模型的效率，人们可能会发现"最低频率 = 2K"是一个最优设置，因为它提供了显著更高效的前向传播，同时性能接近"最低频率 = 512"。
+
+> **图7：** 记忆层级对模型上下文学习性能的影响。（左）RULER的MK-NIAH (Hsieh et al. 2024)，（中）LongHealth (Adams et al. 2025)，（右）QASPER (Dasigi et al. 2021)基准测试。注意对于QASPER基准测试（右），较低的值表示更好的性能。
+
+**在上下文中学习新语言。** 在整篇论文中，我们论证了预训练可以被视为一个上下文学习过程，其中上下文是整个预训练数据。因此，当我们在神经学习模块中使用更多层级，或在不同的上下文流上执行上下文学习时，我们期望模型展现出更好的适应性和持续学习能力。为此，通过结合两个现有基准测试MTOB (Tanzer et al. 2024)和Manchu (Pei et al. 2025)，我们设计了一个新的持续学习任务，大语言模型在上下文中学习两种新语言，并被期望将短语翻译为英语。然后，对于我们的持续新语言翻译（Continual Translation of a Novel Language, CTNL）任务，我们考虑两种设置：(1) 分别在每种语言上学习和测试模型的性能（红色标记）。这是一个基线，用于在与下一设置比较时衡量灾难性遗忘（catastrophic forgetting）；(2) 模型首先以顺序方式学习这两种语言（蓝色标记），然后被要求将短语翻译为英语。我们使用ICL作为基线，并为了研究Hope多层级设计的重要性，我们使用Hope的不同变体，分别具有1、2和3个额外的记忆层级，分别称为Hope-1、Hope-2和Hope-3。
+
+结果如图8所示。具体而言，每个点表示一个模型在某一设置下的性能，其中$x$轴（对应$y$轴）表示模型在满语 $\to$ 英语（对应Kalamang $\to$ 英语）翻译中的ChRF值。在第一种设置（无持续学习的上下文翻译）中，所有Hope变体的表现优于或持平于ICL，支持了CMS设计的重要性。然而在第二种设置（即持续翻译）中，ICL的性能急剧下降，几乎完全依赖于其在预训练中获得的能力（即关于上下文中知识的灾难性遗忘）。另一方面，增加Hope中的记忆层级显示出明显的改进，Hope-3几乎恢复了第一种设置（无持续学习）中ICL的能力。这些结果进一步支持了CMS设计在持续学习中的重要性以及模型自我适应新任务的能力。
+
+> **图8：** 持续新语言翻译（CTNL）任务。红色点为仅使用一种语言的结果。蓝色点为持续学习设置下的结果。
+
+---
+
+### 9.2 Hope：长上下文理解
+
+在上一节中，我们评估了当MLP块被适配以执行上下文学习时Hope-Attention的性能。在本部分中，我们评估Hope在从头开始学习时的长上下文理解性能。为此，我们使用约500亿词元，来自FineWeb-Edu (Penedo et al. 2024)和长上下文文档的混合数据，词汇表大小为32K，从头训练所有模型。所有模型均使用AdamW优化器进行优化，为每个模型调优了学习率，并采用Behrouz et al. (2025c)中的默认优化器配置。我们关注两个热门基准测试：RULER (Hsieh et al. 2024)和BABILong (Kuratov et al. 2024)：
+
+**大海捞针（Needle-in-a-Haystack, NIAH）任务。** 在第一部分中，我们关注不同设置的大海捞针任务：(1) 单针但不同类型（即pass-key、数字和uuid），(2) 多键，(3) 多查询，(4) 多值，均遵循Hsieh et al. (2024)的设置。作为基线，我们使用RetNet (Sun et al. 2023)和DeltaNet (Schlag et al. 2021)作为纯粹基于Hebb规则和Delta规则的模型代表，并实验了多种现代线性循环模型，使用了性能最佳的线性模型：即RWKV-7 (Peng et al. 2025a)和Comba (Hu et al. 2025)。作为另一组基线，我们还与采用点积和$L_2$回归目标的深度记忆模块进行了比较：即DLA (Behrouz et al. 2025a)和Titans (Behrouz et al. 2025c)。
+
+结果如表1所示。与其他无注意力模型相比，Hope在所有任务和所有难度级别上均取得了最佳性能。特别是，与线性记忆相比，深度记忆模块在较长序列上表现更好，主要是因为其具有更高的记忆容量来压缩更多词元。将Hope与Titans进行比较，Hope的优越性能，尤其是在更长上下文长度上，支持了自参照更新（self-referential update）和CMS设计的重要性。最后，我们还评估了Hope-Attention的性能，并将其与Transformer进行比较，以更好地理解CMS设计的贡献。结果表明，Hope-Attention相比Transformer取得了更好的性能，支持了在Hope-Attention设计中引入CMS的优势。
+
+> **表1：** 大海捞针（Needle-In-A-Haystack）实验：(1) 三个难度级别的单针任务——S-NIAH-1（密钥检索）、S-NIAH-2（数字针）和S-NIAH-3（基于UUID的针）；(2) 多查询；(3) 多键；(4) 多值设置。
+
+**单针：**
+
+| | S-NIAH-1（密钥检索） | | | S-NIAH-2（数字针） | | | S-NIAH-3（UUID针） | | |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **模型** | **4K** | **8K** | **16K** | **4K** | **8K** | **16K** | **4K** | **8K** | **16K** |
+| Transformer | 88.6 | 76.4 | 79.8 | 100 | 98.8 | 94.2 | 78.0 | 69.2 | 40.8 |
+| Hope-Attention | 100 | 100 | 100 | 100 | 98.4 | 94.4 | 76.8 | 68.8 | 42.4 |
+| RWKV-7 | 100 | 100 | 99.6 | 93.8 | 44.8 | 12.6 | 63.8 | 13.2 | 5.8 |
+| Comba | 100 | 100 | 99.4 | 92.6 | 47.2 | 13.4 | 62.4 | 13.8 | 7.4 |
+| DLA | 96.4 | 71.2 | 44.0 | 79.6 | 42.6 | 28.2 | 18.2 | 8.8 | 4.0 |
+| Titans | 100 | 100 | 100 | 99.6 | 84.6 | 75.4 | 74.2 | 42.8 | 21.2 |
+| **Hope** | **100** | **100** | **100** | **99.2** | **88.4** | **78.2** | **73.2** | **46.2** | **24.8** |
+
+**多键、多查询、多值：**
+
+| | MK-NIAH-1（多键行检索） | | | MQ-NIAH（多查询） | | | MV-NIAH（多值） | | |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **模型** | **4K** | **8K** | **16K** | **4K** | **8K** | **16K** | **4K** | **8K** | **16K** |
+| Transformer | 79.4 | 83.0 | 61.4 | 58.9 | 48.0 | 29.8 | 37.5 | 34.1 | 21.5 |
+| Hope-Attention | 80.2 | 84.8 | 60.8 | 60.4 | 47.8 | 30.6 | 35.2 | 34.4 | 24.8 |
+| RWKV-7 | 21.4 | 18.8 | 9.6 | 20.4 | 14.8 | 8.6 | 16.2 | 13.4 | 6.8 |
+| Comba | 21.4 | 19.4 | 8.2 | 21.8 | 15.2 | 6.4 | 16.5 | 13.5 | 7.2 |
+| DLA | 27.4 | 20.0 | 11.8 | 26.4 | 22.0 | 6.4 | 25.6 | 12.8 | 9.6 |
+| Titans | 26.4 | 23.6 | 8.2 | 22.8 | 19.8 | 9.4 | 24.6 | 15.1 | 8.2 |
+| **Hope** | **29.4** | **24.8** | **14.8** | **31.7** | **24.8** | **14.2** | **31.4** | **17.2** | **11.4** |
+
+**BABILong。** 接下来，我们在BABILong基准测试 (Kuratov et al. 2024)上评估Hope的性能，并与以下模型进行比较：(1) 大型模型如GPT4和GPT4o-mini (Achiam et al. 2023)；(2) 中等规模的Llama-8B模型 (Dubey et al. 2024)及其RAG增强版本；(3) 该任务上最先进的小型模型：即RMT (Bulatov et al. 2022)、ARMT (Rodkin et al. 2024)和Titans (Behrouz et al. 2025c)。我们遵循基准测试的原始设置，并按照Kuratov et al. (2024)相同的流程对小型模型进行微调。
+
+结果如图9所示。大型模型随着序列长度的增加表现出显著的性能下降，所有模型在128K–256K上下文长度左右都出现了失败。RAG增强模型也随着上下文增长而出现性能下降，但在256K上下文长度之后能够相对维持其性能。在微调模型中，Titans、ARMT和Hope在100万上下文长度之前展现出相当的结果，但Titans和ARMT的性能在此之后快速下降。Hope即使在1000万上下文长度下仍能保持良好性能，这主要得益于其CMS设计。值得注意的是，所有小型模型（包括Hope）在不经过微调时性能可能会显著下降。原因在于，压缩大量上下文（如1000万词元），除了需要在高频层级上具备强大的记忆管理能力外，还需要足够的容量来压缩1000万词元或至少是最终答案所需的词元。微调步骤有助于模型调整其低频层级以实现快速适应，从而在高频层级上正确管理其记忆。
+
+> **图9：** BABILong基准测试。红色点为微调模型的结果，蓝色点为大型模型的零样本（zero-shot）结果。
+
+---
+
+### 9.3 Hope：语言建模与常识推理
+
+在本节中，我们旨在研究Hope作为语言模型骨干网络的表现，并在常规语言建模和常识推理任务上对其进行评估，实验设置如下：
+
+- **数据集：** 我们在Wikitext (Merity et al. 2017)、LMB (Paperno et al. 2016)、PIQA (Bisk et al. 2020)、HellaSwag (Zellers et al. 2019)、WinoGrande (Sakaguchi et al. 2021)、ARC-easy (ARC-e)和ARC-challenge (ARC-c) (Clark et al. 2018)、SIQA (Sap et al. 2019)以及BoolQ (Clark et al. 2019)基准测试上评估Hope和基线模型。
+- **基线：** 与第9.2节类似，我们使用RetNet (Sun et al. 2023)和DeltaNet (Schlag et al. 2021)作为纯粹基于Hebb规则或Delta规则的模型代表，以及两个性能最佳的现代矩阵值循环模型：即RWKV-7 (Peng et al. 2025a)和Comba (Hu et al. 2025)。作为另一组基线，我们与采用点积、$L_2$和$L_p$回归等不同内部注意力偏置的无注意力深度记忆模块进行比较：即TTT (Sun et al. 2024)、Miras (Behrouz et al. 2025b)、DLA (Behrouz et al. 2025a)和Titans (Behrouz et al. 2025c)。最后，我们还与Transformer (Vaswani et al. 2017; Dubey et al. 2024)以及注意力与线性RNN的混合模型Samba (Ren et al. 2024)进行比较。
+- **训练：** 我们训练了约760M和1.3B参数的模型，分别使用30B和100B词元进行训练，数据来自FineWeb-Edu (Penedo et al. 2024)和长上下文文档的混合，词汇表大小为32K，所有模型从头训练。所有模型均使用AdamW优化器，为每个模型调优了学习率，并采用Behrouz et al. (2025c)中的默认优化器配置。
+
+结果如表2所示。Hope在语言建模和常识推理基准测试的平均性能上均优于所有基线模型。有趣的是，随着参数规模的扩展，Hope相比其他无注意力模型展现出更高的性能增益。
+
+> **表2：** 模型在语言建模和常识推理任务上的性能。
+
+**760M参数 / 30B词元：**
+
+| 模型 | Wiki. ppl $\downarrow$ | LMB. ppl $\downarrow$ | LMB. acc $\uparrow$ | PIQA acc $\uparrow$ | Hella. acc_n $\uparrow$ | Wino. acc $\uparrow$ | ARC-e acc $\uparrow$ | ARC-c acc_n $\uparrow$ | SIQA acc $\uparrow$ | BoolQ acc $\uparrow$ | 平均 $\uparrow$ |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Transformer++ | 24.18 | 24.27 | 37.1 | 67.2 | 43.8 | 53.0 | 65.6 | 33.4 | 39.1 | 61.7 | 50.11 |
+| Samba$^*$ | 21.07 | 22.85 | 39.2 | 68.9 | 47.8 | 53.1 | 65.8 | 34.9 | 38.9 | 63.1 | 51.46 |
+| RetNet | 25.77 | 24.19 | 34.5 | 66.8 | 41.2 | 51.9 | 63.6 | 32.5 | 38.8 | 56.2 | 48.19 |
+| DeltaNet | 24.52 | 24.38 | 36.8 | 67.3 | 44.5 | 51.8 | 64.2 | 32.7 | 39.6 | 60.1 | 49.63 |
+| RWKV-7 | 23.75 | 23.08 | 37.1 | 67.3 | 47.6 | 52.2 | 64.7 | 34.2 | 39.4 | 61.9 | 50.55 |
+| Comba | 22.41 | 22.19 | 37.5 | 66.9 | 48.2 | 52.4 | 65.1 | 34.1 | 40.1 | 62.8 | 50.89 |
+| TTT | 24.17 | 23.51 | 34.7 | 67.3 | 43.9 | 51.0 | 64.5 | 33.8 | 40.2 | 59.6 | 47.32 |
+| Miras (Memora) | 22.28 | 22.31 | 38.2 | 67.8 | 49.3 | 53.3 | 63.6 | 36.1 | 40.9 | 63.0 | 51.53 |
+| DLA | 23.12 | 22.09 | 36.1 | 68.0 | 47.9 | 52.7 | 65.8 | 34.6 | 39.1 | 59.6 | 50.48 |
+| Titans | 20.08 | 21.52 | 38.1 | 69.1 | 48.5 | 52.7 | 66.2 | 35.7 | 40.3 | 62.8 | 51.68 |
+| **Hope** | **18.68** | **20.07** | **38.8** | **69.2** | **49.1** | **53.6** | **66.8** | **36.1** | **41.2** | **63.4** | **52.28** |
+
+**1.3B参数 / 100B词元：**
+
+| 模型 | Wiki. ppl $\downarrow$ | LMB. ppl $\downarrow$ | LMB. acc $\uparrow$ | PIQA acc $\uparrow$ | Hella. acc_n $\uparrow$ | Wino. acc $\uparrow$ | ARC-e acc $\uparrow$ | ARC-c acc_n $\uparrow$ | SIQA acc $\uparrow$ | BoolQ acc $\uparrow$ | 平均 $\uparrow$ |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Transformer++ | 17.92 | 17.73 | 42.6 | 71.4 | 52.3 | 54.1 | 69.9 | 36.5 | 41.8 | 58.4 | 53.38 |
+| Samba$^*$ | 16.15 | 13.21 | 45.2 | 71.5 | 53.8 | 55.8 | 69.1 | 36.7 | 40.6 | 63.0 | 54.46 |
+| RetNet | 18.91 | 17.04 | 41.2 | 71.3 | 49.1 | 55.2 | 67.5 | 34.1 | 41.4 | 61.0 | 52.60 |
+| DeltaNet | 18.62 | 17.10 | 41.6 | 70.1 | 49.4 | 52.7 | 67.6 | 35.2 | 39.7 | 54.8 | 51.39 |
+| RWKV-7 | 18.44 | 15.96 | 46.7 | 72.4 | 54.9 | 57.5 | 71.6 | 38.2 | 40.7 | 60.4 | 55.30 |
+| Comba | 18.16 | 14.87 | 46.9 | 73.1 | 54.5 | 57.7 | 72.0 | 39.1 | 40.2 | 60.6 | 55.39 |
+| TTT | 18.42 | 14.51 | 46.8 | 72.9 | 55.2 | 59.0 | 71.8 | 39.5 | 39.8 | 59.6 | 55.58 |
+| Miras (Memora) | 15.90 | 12.04 | 48.7 | 73.1 | 56.0 | 57.4 | 71.5 | 37.9 | 40.2 | 61.3 | 55.76 |
+| DLA | 16.31 | 12.29 | 44.5 | 70.6 | 53.9 | 54.2 | 69.6 | 36.0 | 40.8 | 60.2 | 53.72 |
+| Titans | 15.60 | 11.41 | 49.1 | 73.1 | 56.3 | 59.8 | 72.4 | 40.8 | 42.1 | 61.0 | 56.82 |
+| **Hope** | **14.39** | **10.08** | **51.0** | **73.9** | **57.5** | **61.2** | **73.8** | **42.7** | **42.8** | **61.4** | **58.04** |
+
+$^*$ Samba是注意力 + 线性RNN的混合模型 (Ren et al. 2024)。
+
+---
+
+### 9.4 Hope：上下文召回任务与MAD合成基准测试
+
+上下文召回（in-context recall）通常被认为是无注意力模型面临的最具挑战性的基准测试之一。在本节中，我们遵循Arora et al. (2024)的方法，在SWDE (Lockard et al. 2019)、NQ (Kwiatkowski et al. 2019)、DROP (Dua et al. 2019)、FDA (Arora et al. 2023)、SQUAD (Rajpurkar et al. 2016)和TQA (Kembhavi et al. 2017)上进行实验，以评估Hope设计的有效性。我们使用与前一节相同的基线集合和实验设置。
+
+结果如表3所示。Transformer取得了最佳性能，而Hope展现了具有竞争力的结果，优于所有无注意力基线，并缩小了与Transformer之间的差距。
+
+> **表3：** Hope和基线模型在短上下文召回任务上的性能。Hope优于所有无注意力模型，并缩小了与Transformer的差距。
+
+| 模型 | SWDE | NQ | DROP | FDA | SQUAD | TQA |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Transformers | 71.4 | 22.0 | 23.9 | 67.3 | 39.4 | 59.1 |
+| RWKV-7 | 52.3 | 17.8 | 21.7 | 32.8 | 28.5 | 56.2 |
+| Comba | 53.9 | 19.1 | 21.9 | 35.5 | 30.2 | 56.4 |
+| Titans | 60.8 | 20.3 | 22.0 | 37.6 | 31.8 | 57.5 |
+| **Hope** | **65.9** | **21.2** | **22.8** | **41.9** | **33.0** | **57.7** |
+
+我们还在MAD基准测试 (Poli et al. 2024)上研究了Hope的性能，这是一个合成基准测试，评估模型在召回、记忆、压缩和复制任务上的表现。结果如表4所示。Hope相比基线模型取得了最佳结果。
+
+> **表4：** Hope和基线模型在MAD合成基准测试 (Poli et al. 2024)上的性能。Hope优于所有基线模型，包括Transformer。
+
+| 模型 | 压缩 | ICR | 模糊ICR | 选择性复制 | 记忆 |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Transformers | 49.4 | 100 | 47.9 | 96.2 | 83.7 |
+| RWKV-7 | 45.1 | 100 | 32.8 | 95.6 | 82.2 |
+| Comba | 46.3 | 100 | 32.8 | 96.4 | 82.9 |
+| Titans | 49.8 | 100 | 50.0 | 99.4 | 83.4 |
+| **Hope** | **51.2** | **100** | **52.1** | **99.7** | **85.2** |
+
+---
+
+### 9.5 语言识别任务
+
+Transformer的一个关键局限性在于不可并行化的任务，其中循环机制在实现适当性能方面起着重要作用。此类任务的一个例子是状态追踪问题（state tracking problem），模型需要根据一系列指令（移动等）追踪其状态，多项研究已表明Transformer在理论和实践中都显著逊色于具有非线性循环的模型 (Merrill et al. 2024; Grazzi et al. 2025)。在本节中，我们关注形式语言识别（formal language recognition）任务，并遵循Irie et al. (2023)的基准测试构造方法。
+
+结果如表5所示。Hope在所有任务上都取得了满分，与其他非线性循环模型类似，例如LSTM (Schmidhuber et al. 1997)和SRWM (Irie et al. 2022b)。然而，Hope的主要优势在于，当需要时，它可以进行可并行化的训练，因此可以扩展到更大规模的语言建模任务。
+
+> **表5：** 各模型在形式语言识别任务上的准确率。
+
+| | | 非星自由正则语言 | | 计数语言 | | 可并行 | |
+|---|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **模型** | **训练方式** | **奇偶校验** | $(aa)^*$ | $(abab)^*$ | $a^n b^n$ | $a^n b^n c^n$ | **Shuffle-2** |
+| | | Bin0 / Bin1 | Bin0 / Bin1 | Bin0 / Bin1 | Bin0 / Bin1 | Bin0 / Bin1 | Bin0 / Bin1 |
+| LSTM | 非并行 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 |
+| Transformer | 并行 | 46.4 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 |
+| Linear | 并行 | 78.1 / 0.0 | 0.0 / 0.0 | 0.0 / 0.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 |
+| DeltaNet | 并行 | 98.2 / 10.1 | 0.0 / 0.0 | 0.0 / 0.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 |
+| SRWM | 非并行 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 | 100.0 / 100.0 |
+| **Hope** | **并行** | **100.0 / 100.0** | **100.0 / 100.0** | **100.0 / 100.0** | **100.0 / 100.0** | **100.0 / 100.0** | **100.0 / 100.0** |
+
+---
+
+### 9.6 Hope：消融实验与扩展性
+
+在本节中，我们首先通过消融实验（ablation study）来研究Hope架构设计选择的重要性，每次移除或更改Hope的一个组件。注意，在之前的实验中，我们已经评估了某些组件的重要性：例如，图8和图7已经展示了层级数量和更新频率对Hope在持续学习中性能的影响。在本节中，为了比较不同变体，我们使用模型在语言建模中的平均困惑度（perplexity）以及常识推理任务中的平均准确率。结果如表6所示。
+
+1. 第一行将Delta梯度下降（Delta Gradient Descent）替换为自修改Titans设计中的简单梯度下降；
+2. 第二行移除了自修改Titans中的动量项；
+3. 移除了权重衰减；
+4. 从Hope架构中移除了CMS；
+5. & 6. & 7. 将$\boldsymbol{k}$、$\boldsymbol{v}$、$\boldsymbol{q}$的投影从高频层级转移到最低频层级。
+
+Hope的所有组件都对其在这些任务中的优越性能做出了贡献，移除或更改其中任何一个都会损害模型在语言建模中的困惑度和/或常识推理任务中的准确率。
+
+> **表6：** Hope的消融实验。Hope的所有组件都对其性能产生积极贡献。
+
+| 模型 | 语言建模 ppl $\downarrow$ | 推理 acc $\uparrow$ |
+|---|:---:|:---:|
+| **Hope** | **12.24** | **58.1** |
+| 不使用DGD | 13.41 | 56.5 |
+| 不使用动量 | 13.58 | 56.9 |
+| 不使用权重衰减 | 13.71 | 57.2 |
+| 不使用CMS | 13.04 | 57.3 |
+| 不使用内部投影 $\boldsymbol{k}$ | 13.77 | 56.9 |
+| 不使用内部投影 $\boldsymbol{v}$ | 13.90 | 55.1 |
+| 不使用内部投影 $\boldsymbol{q}$ | 12.19 | 57.4 |
+
+> **图10：** 上下文使用对模型困惑度的影响。我们期望具有强大记忆管理能力的模型的困惑度随着更多上下文的使用而降低。
+
+---
+
+### 9.7 高表达力优化器
+
+在本节中，我们从寻找解的有效性和大规模训练效率两个方面评估我们的M3优化器的性能：
+
+**ImageNet。** 在本实验中，我们关注视觉任务中的ViT (Dosovitskiy et al. 2021)架构，并在ImageNet-21K上进行预训练，该数据集包含1100万张图像，对应10,450个类别。我们使用16的patch大小，对于24M和86M两个规模的模型分别使用1536和3072的MLP维度。我们控制了所有其他组件，并为每个优化器分别调优超参数以确保公平比较。我们变更训练ViT的优化器以了解哪个优化器在相同的训练步数内找到更有效的解。使用不同优化器训练的模型的训练和测试损失如图11所示。我们的M3在训练/测试损失上均优于AdamW和Muon。
+
+> **图11：** 使用AdamW、Muon和我们的M3优化器在ImageNet-21K (Ridnik et al. 2021)上训练的ViT测试和训练损失。
+
+**大模型中的效率。** 由于ImageNet所需的模型规模较小，我们还在训练语言模型时进行了效率比较。为此，我们使用140M和1.3B两个规模，并使用不同的优化器——Muon (Jordan et al. 2024)、AdaMuon (Si et al. 2025)和我们的M3——训练相同的Transformer模型。结果如图12所示。由于使用了多个动量（记忆），我们的M3优化器相比Muon优化器速度较慢，与AdaMuon的效率相当。
+
+> **图12：** 使用Muon、AdaMuon和M3优化器训练140M和1.3B参数模型的训练时间。
+
+---
+
+## 10 结论
+
+在本文中，我们引入了**嵌套学习（Nested Learning, NL）**，这是一种新的学习范式，其中现代机器学习系统被建模为相互连接的多层级优化问题，每个层级拥有自己的上下文流和更新频率。在这一视角下，架构和优化器都是嵌套关联记忆系统的实例，它们将各自的上下文（无论是词元、梯度还是更高层级的信号）压缩到内部参数中。这一视角将预训练、上下文学习和持续学习重新诠释为同一底层机制的不同表现形式：在不同层级和时间尺度上学习压缩和复用上下文。这一视角将反向传播、动量和预条件化重新解释为关联记忆机制，并将广泛的现有方法解释为一个更大（此前隐藏的）设计空间中的特定设计点。
+
+基于NL的视角，我们推导了广义的基于梯度的更新规则：例如，Delta梯度下降（Delta Gradient Descent）、Delta动量（Delta Momentum）、多尺度动量Muon（M3），并重新解释了现代序列架构作为嵌套关联记忆。为了增强记忆处理能力，我们引入了**连续体记忆系统（Continuum Memory System, CMS）**，这是一种新的记忆表述方式，推广了传统的"长期/短期记忆块"的观点。我们的**Hope**架构基于自修改Titans和CMS，提升了持续学习和长上下文推理能力，同时作为通用骨干网络仍然保持竞争力。
+
+**灾难性遗忘是否已被解决？** 虽然Hope和CMS在我们实证研究的任务中展现了减少灾难性遗忘（catastrophic forgetting）的有前景的结果，但灾难性遗忘这一不良现象在一般意义上并未被"解决"。从嵌套学习对学习和反向传播过程的视角来看，灾难性遗忘是压缩的自然结果，其中网络的有限容量迫使模型遗忘，以便为新信息保留容量。我们将NL视为一条路线图而非最终目的地：它表明，在持续学习、长上下文推理、现代优化器和自修改模型方面的进步，将来自于更好地利用层级这一额外设计维度，而非不断加深的静态网络。
+## 参考文献
+
+[1] Walter Pitts. "The linear theory of neuron networks: The dynamic problem". In: *The bulletin of mathematical biophysics* 5 (1943), pp. 23--31.
+
+[2] Warren S McCulloch and Walter Pitts. "The statistical organization of nervous activity". In: *Biometrics* 4.2 (1948), pp. 91--99.
+
+[3] Warren S McCulloch. "The brain computing machine". In: *Electrical Engineering* 68.6 (1949), pp. 492--497.
+
+[4] William Beecher Scoville and Brenda Milner. "Loss of recent memory after bilateral hippocampal lesions". In: *Journal of neurology, neurosurgery, and psychiatry* 20.1 (1957), p. 11.
+
+[5] Arthur L Samuel. "Some studies in machine learning using the game of checkers". In: *IBM Journal of research and development* 3.3 (1959), pp. 210--229.
+
+[6] Seppo Linnainmaa. "The representation of the cumulative rounding error of an algorithm as a Taylor expansion of the local rounding errors". PhD thesis. Master's Thesis (in Finnish), Univ. Helsinki, 1970.
+
+[7] Kunihiko Fukushima. "Neocognitron: A self-organizing neural network model for a mechanism of pattern recognition unaffected by shift in position". In: *Biological cybernetics* 36.4 (1980), pp. 193--202.
+
+[8] Erkki Oja. "Simplified neuron model as a principal component analyzer". In: *Journal of mathematical biology* 15.3 (1982), pp. 267--273.
+
+[9] David E Rumelhart, Geoffrey E Hinton, and Ronald J Williams. "Learning representations by back-propagating errors". In: *nature* 323.6088 (1986), pp. 533--536.
+
+[10] Geoffrey E Hinton and David C Plaut. "Using fast weights to deblur old memories". In: *Proceedings of the ninth annual conference of the Cognitive Science Society*. 1987, pp. 177--186.
+
+[11] DL Prados and SC Kak. "Neural network capacity using delta rule". In: *Electronics Letters* 25.3 (1989), pp. 197--199.
+
+[12] Juergen Schmidhuber. "Learning to control fast-weight memories: An alternative to recurrent nets. Accepted for publication in". In: *Neural Computation* (1992).
+
+[13] Tim VP Bliss and Graham L Collingridge. "A synaptic model of memory: long-term potentiation in the hippocampus". In: *Nature* 361.6407 (1993), pp. 31--39.
+
+[14] Jurgen Schmidhuber. "A 'self-referential' weight matrix". In: *International conference on artificial neural networks*. Springer. 1993, pp. 446--450.
+
+[15] Juergen Schmidhuber, Jieyu Zhao, and Marco Wiering. *Simple principles of metalearning*. 1996.
+
+[16] Uwe Frey and Richard GM Morris. "Synaptic tagging and long-term potentiation". In: *Nature* 385.6616 (1997), pp. 533--536.
+
+[17] Juergen Schmidhuber and Sepp Hochreiter. "Long Short-term Memory". In: *Neural Computation MIT-Press* (1997).
+
+[18] Amos Storkey. "Increasing the capacity of a hopfield network without sacrificing functionality". In: *International Conference on Artificial Neural Networks*. Springer. 1997, pp. 451--456.
+
+[19] Richard S Sutton, Andrew G Barto, et al. *Reinforcement learning: An introduction*. Vol. 1. 1. 1998.
+
+[20] Jonathan H. Connell and Sridhar Mahadevan. "Robot Learning". In: *Robotica* 17.2 (1999), pp. 229--235. doi: 10.1017/S0263574799271172.
+
+[21] Sean PA Drummond, Gregory G Brown, J Christian Gillin, John L Stricker, Eric C Wong, and Richard B Buxton. "Altered brain response to verbal learning following sleep deprivation". In: *Nature* 403.6770 (2000), pp. 655--657.
+
+[22] Hideyuki Okano, Tomoo Hirano, and Evan Balaban. "Learning and memory". In: *Proceedings of the National Academy of Sciences* 97.23 (2000), pp. 12403--12404.
+
+[23] Jurgen Schmidhuber. "Godel machines: self-referential universal problem solvers making provably optimal self-improvements". In: *arXiv preprint cs/0309048* (2003).
+
+[24] Gyorgy Buzsaki and Andreas Draguhn. "Neuronal oscillations in cortical networks". In: *science* 304.5679 (2004), pp. 1926--1929.
+
+[25] Donald Olding Hebb. *The organization of behavior: A neuropsychological theory*. Psychology press, 2005.
+
+[26] Alvaro Pascual-Leone, Amir Amedi, Felipe Fregni, and Lotfi B Merabet. "The plastic human brain cortex". In: *Annu. Rev. Neurosci.* 28.1 (2005), pp. 377--401.
+
+[27] David J Foster and Matthew A Wilson. "Reverse replay of behavioural sequences in hippocampal place cells during the awake state". In: *Nature* 440.7084 (2006), pp. 680--683.
+
+[28] Lisa Marshall, Halla Helgadottir, Matthias Molle, and Jan Born. "Boosting slow oscillations during sleep potentiates memory". In: *Nature* 444.7119 (2006), pp. 610--613. doi: 10.1038/nature05278.
+
+[29] Soren Auer, Christian Bizer, Georgi Kobilarov, Jens Lehmann, Richard Cyganiak, and Zachary Ives. "Dbpedia: A nucleus for a web of open data". In: *international semantic web conference*. Springer. 2007, pp. 722--735.
+
+[30] Timothy J. Buschman and Earl K. Miller. "Top-down versus bottom-up control of attention in the prefrontal and posterior parietal cortices". In: *Science* 315.5820 (2007), pp. 1860--1862. doi: 10.1126/science.1138071.
+
+[31] Daoyun Ji and Matthew A Wilson. "Coordinated memory replay in the visual cortex and hippocampus during sleep". In: *Nature neuroscience* 10.1 (2007), pp. 100--107.
+
+[32] Seung-Schik Yoo, Peter T Hu, Ninad Gujar, Ferenc A Jolesz, and Matthew P Walker. "A deficit in the ability to form new human memories without sleep". In: *Nature neuroscience* 10.3 (2007), pp. 385--392.
+
+[33] Nicholas J Higham. *Functions of matrices: theory and computation*. SIAM, 2008.
+
+[34] Michael V Johnston. "Plasticity in the developing brain: implications for rehabilitation". In: *Developmental disabilities research reviews* 15.2 (2009), pp. 94--101.
+
+[35] Adrien Peyrache, Mehdi Khamassi, Karim Benchenane, Sidney I Wiener, and Francesco P Battaglia. "Replay of rule-learning related neural patterns in the prefrontal cortex during sleep". In: *Nature neuroscience* 12.7 (2009), pp. 919--926.
+
+[36] Susanne Diekelmann and Jan Born. "The memory function of sleep". In: *Nature Reviews Neuroscience* 11.2 (2010), pp. 114--126. doi: 10.1038/nrn2762.
+
+[37] John Duchi, Elad Hazan, and Yoram Singer. "Adaptive subgradient methods for online learning and stochastic optimization." In: *Journal of machine learning research* 12.7 (2011).
+
+[38] Juergen Fell and Nikolai Axmacher. "The role of phase synchronization in memory processes". In: *Nature reviews neuroscience* 12.2 (2011), pp. 105--118.
+
+[39] Geoffrey Hinton, Nitish Srivastava, and Kevin Swersky. "Neural networks for machine learning lecture 6a overview of mini-batch gradient descent". In: *Cited on* 14.8 (2012), p. 2.
+
+[40] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. "Imagenet classification with deep convolutional neural networks". In: *Advances in neural information processing systems* 25 (2012).
+
+[41] Hong-Viet V. Ngo, Thomas Martinetz, Jan Born, and Matthias Molle. "Auditory closed-loop stimulation of the sleep slow oscillation enhances memory". In: *Neuron* 78.3 (2013), pp. 545--553. doi: 10.1016/j.neuron.2013.03.006.
+
+[42] Dzmitry Bahdanau. "Neural machine translation by jointly learning to align and translate". In: *arXiv preprint arXiv:1409.0473* (2014).
+
+[43] James F Cavanagh and Michael J Frank. "Frontal theta as a mechanism for cognitive control". In: *Trends in cognitive sciences* 18.8 (2014), pp. 414--421.
+
+[44] Diederik P Kingma and Jimmy Ba. "Adam: A method for stochastic optimization". In: *arXiv preprint arXiv:1412.6980* (2014).
+
+[45] Diederik P. Kingma and Max Welling. "Auto-Encoding Variational Bayes." In: *ICLR*. Ed. by Yoshua Bengio and Yann LeCun. 2014.
+
+[46] Guido Montufar, Razvan Pascanu, Kyunghyun Cho, and Yoshua Bengio. "On the number of linear regions of deep neural networks". In: *Advances in neural information processing systems* 27 (2014).
+
+[47] Pascal Fries. "Rhythms for cognition: communication through coherence". In: *Neuron* 88.1 (2015), pp. 220--235.
+
+[48] Yann LeCun, Yoshua Bengio, and Geoffrey Hinton. "Deep learning". In: *nature* 521.7553 (2015), pp. 436--444.
+
+[49] Bernhard P. Staresina, Til Ole Bergmann, Mathilde Bonnefond, Roemer van der Meij, Ole Jensen, Lorena Deuker, Christian E. Elger, Nikolai Axmacher, and Jurgen Fell. "Hierarchical nesting of slow oscillations, spindles and ripples in the human hippocampus during sleep". In: *Nature Neuroscience* 18.11 (2015), pp. 1679--1686. doi: 10.1038/nn.4119.
+
+[50] Jimmy Ba, Geoffrey E Hinton, Volodymyr Mnih, Joel Z Leibo, and Catalin Ionescu. "Using fast weights to attend to the recent past". In: *Advances in neural information processing systems* 29 (2016).
+
+[51] Timothy Dozat. "Incorporating nesterov momentum into adam". In: (2016).
+
+[52] Andrew C. Heusser, David Poeppel, Youssef Ezzyat, and Lila Davachi. "Episodic sequence memory is supported by a theta--gamma phase code". In: *Nature Neuroscience* 19.10 (2016), pp. 1374--1380. doi: 10.1038/nn.4374.
+
+[53] Mikael Lundqvist, Pawel Herman, Scott L. Brincat, Timothy J. Buschman, and Earl K. Miller. "Gamma and beta bursts underlie working memory". In: *Neuron* 90.1 (2016), pp. 152--164. doi: 10.1016/j.neuron.2016.02.028.
+
+[54] Denis Paperno, German Kruszewski, Angeliki Lazaridou, Ngoc Quan Pham, Raffaella Bernardi, Sandro Pezzelle, Marco Baroni, Gemma Boleda, and Raquel Fernandez. "The LAMBADA dataset: Word prediction requiring a broad discourse context". In: *Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)*. Ed. by Katrin Erk and Noah A. Smith. Berlin, Germany: Association for Computational Linguistics, Aug. 2016, pp. 1525--1534. doi: 10.18653/v1/P16-1144.
+
+[55] Ben Poole, Subhaneil Lahiri, Maithra Raghu, Jascha Sohl-Dickstein, and Surya Ganguli. "Exponential expressivity in deep neural networks through transient chaos". In: *Advances in neural information processing systems* 29 (2016).
+
+[56] Pranav Rajpurkar, Jian Zhang, Konstantin Lopyrev, and Percy Liang. "Squad: 100,000+ questions for machine comprehension of text". In: *arXiv preprint arXiv:1606.05250* (2016).
+
+[57] Sashank J Reddi, Ahmed Hefny, Suvrit Sra, Barnabas Poczos, and Alex Smola. "Stochastic variance reduction for nonconvex optimization". In: *International conference on machine learning*. PMLR. 2016, pp. 314--323.
+
+[58] David Silver, Aja Huang, Chris J Maddison, Arthur Guez, Laurent Sifre, George Van Den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Veda Panneershelvam, Marc Lanctot, et al. "Mastering the game of Go with deep neural networks and tree search". In: *nature* 529.7587 (2016), pp. 484--489.
+
+[59] Thomas B Christophel, P Christiaan Klink, Bernhard Spitzer, Pieter R Roelfsema, and John-Dylan Haynes. "The distributed nature of working memory". In: *Trends in cognitive sciences* 21.2 (2017), pp. 111--124.
+
+[60] Chelsea Finn, Pieter Abbeel, and Sergey Levine. "Model-agnostic meta-learning for fast adaptation of deep networks". In: *International conference on machine learning*. PMLR. 2017, pp. 1126--1135.
+
+[61] Joel Hestness, Sharan Narang, Newsha Ardalani, Gregory Diamos, Heewoo Jun, Hassan Kianinejad, Md Mostofa Ali Patwary, Yang Yang, and Yanqi Zhou. "Deep learning scaling is predictable, empirically". In: *arXiv preprint arXiv:1712.00409* (2017).
+
+[62] Aniruddha Kembhavi, Minjoon Seo, Dustin Schwenk, Jonghyun Choi, Ali Farhadi, and Hannaneh Hajishirzi. "Are you smarter than a sixth grader? textbook question answering for multimodal machine comprehension". In: *Proceedings of the IEEE Conference on Computer Vision and Pattern recognition*. 2017, pp. 4999--5007.
+
+[63] James Kirkpatrick, Razvan Pascanu, Neil Rabinowitz, Joel Veness, Guillaume Desjardins, Andrei A Rusu, Kieran Milan, John Quan, Tiago Ramalho, Agnieszka Grabska-Barwinska, et al. "Overcoming catastrophic forgetting in neural networks". In: *Proceedings of the national academy of sciences* 114.13 (2017), pp. 3521--3526.
+
+[64] Takashi Kitamura, Sachie K Ogawa, Dheeraj S Roy, Teruhiro Okuyama, Mark D Morrissey, Lillian M Smith, Roger L Redondo, and Susumu Tonegawa. "Engrams and circuits crucial for systems consolidation of a memory". In: *Science* 356.6333 (2017), pp. 73--78.
+
+[65] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. "Pointer Sentinel Mixture Models". In: *International Conference on Learning Representations*. 2017.
+
+[66] W Scott Terry. *Learning and memory: Basic principles, processes, and procedures*. Routledge, 2017.
+
+[67] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Lukasz Kaiser, and Illia Polosukhin. "Attention is All you Need". In: *Advances in Neural Information Processing Systems*. Ed. by I. Guyon, U. Von Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett. Vol. 30. Curran Associates, Inc., 2017.
+
+[68] Jeremy Bernstein, Yu-Xiang Wang, Kamyar Azizzadenesheli, and Animashree Anandkumar. "signSGD: Compressed optimisation for non-convex problems". In: *International conference on machine learning*. PMLR. 2018, pp. 560--569.
+
+[69] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. "Think you have solved question answering? try arc, the ai2 reasoning challenge". In: *arXiv preprint arXiv:1803.05457* (2018).
+
+[70] Jianqing Fan. *Local polynomial modelling and its applications: monographs on statistics and applied probability 66*. Routledge, 2018.
+
+[71] Vineet Gupta, Tomer Koren, and Yoram Singer. "Shampoo: Preconditioned stochastic tensor optimization". In: *International Conference on Machine Learning*. PMLR. 2018, pp. 1842--1850.
+
+[72] David Silver, Thomas Hubert, Julian Schrittwieser, Ioannis Antonoglou, Matthew Lai, Arthur Guez, Marc Lanctot, Laurent Sifre, Dharshan Kumaran, Thore Graepel, et al. "A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play". In: *Science* 362.6419 (2018), pp. 1140--1144.
+
+[73] Christopher Clark, Kenton Lee, Ming-Wei Chang, Tom Kwiatkowski, Michael Collins, and Kristina Toutanova. "BoolQ: Exploring the Surprising Difficulty of Natural Yes/No Questions". In: *Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers)*. Ed. by Jill Burstein, Christy Doran, and Thamar Solorio. Minneapolis, Minnesota: Association for Computational Linguistics, June 2019, pp. 2924--2936. doi: 10.18653/v1/N19-1300.
+
+[74] Dheeru Dua, Yizhong Wang, Pradeep Dasigi, Gabriel Stanovsky, Sameer Singh, and Matt Gardner. "DROP: A reading comprehension benchmark requiring discrete reasoning over paragraphs". In: *arXiv preprint arXiv:1903.00161* (2019).
+
+[75] R Devon Hjelm, Alex Fedorov, Samuel Lavoie-Marchildon, Karan Grewal, Phil Bachman, Adam Trischler, and Yoshua Bengio. "Learning deep representations by mutual information estimation and maximization". In: *International Conference on Learning Representations*. 2019.
+
+[76] Jens G Klinzing, Niels Niethard, and Jan Born. "Mechanisms of systems memory consolidation during sleep". In: *Nature neuroscience* 22.10 (2019), pp. 1598--1610.
+
+[77] Tom Kwiatkowski, Jennimaria Palomaki, Olivia Redfield, Michael Collins, Ankur Parikh, Chris Alberti, Danielle Epstein, Illia Polosukhin, Jacob Devlin, Kenton Lee, et al. "Natural questions: a benchmark for question answering research". In: *Transactions of the Association for Computational Linguistics* 7 (2019), pp. 453--466.
+
+[78] Stefan Larson, Anish Mahendran, Joseph J Peper, Christopher Clarke, Andrew Lee, Parker Hill, Jonathan K Kummerfeld, Kevin Leach, Michael A Laurenzano, Lingjia Tang, et al. "An Evaluation Dataset for Intent Classification and Out-of-Scope Prediction". In: *Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)*. 2019, pp. 1311--1316.
+
+[79] Colin Lockard, Prashant Shiralkar, and Xin Luna Dong. "Openceres: When open information extraction meets the semi-structured web". In: *Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long and Short Papers)*. 2019, pp. 3047--3056.
+
+[80] Tsendsuren Munkhdalai, Alessandro Sordoni, Tong Wang, and Adam Trischler. "Metalearned neural memory". In: *Advances in Neural Information Processing Systems* 32 (2019).
+
+[81] Maarten Sap, Hannah Rashkin, Derek Chen, Ronan Le Bras, and Yejin Choi. "Social IQa: Commonsense Reasoning about Social Interactions". In: *Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing (EMNLP-IJCNLP)*. Ed. by Kentaro Inui, Jing Jiang, Vincent Ng, and Xiaojun Wan. Hong Kong, China: Association for Computational Linguistics, Nov. 2019, pp. 4463--4473. doi: 10.18653/v1/D19-1454.
+
+[82] Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and Yejin Choi. "HellaSwag: Can a Machine Really Finish Your Sentence?" In: *Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics*. Ed. by Anna Korhonen, David Traum, and Lluis Marquez. Florence, Italy: Association for Computational Linguistics, July 2019, pp. 4791--4800. doi: 10.18653/v1/P19-1472.
+
+[83] Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al. "Piqa: Reasoning about physical commonsense in natural language". In: *Proceedings of the AAAI conference on artificial intelligence*. Vol. 34. 2020, pp. 7432--7439.
+
+[84] Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. "Language models are few-shot learners". In: *Advances in neural information processing systems* 33 (2020), pp. 1877--1901.
+
+[85] Inigo Casanueva, Tadas Temcinas, Daniela Gerz, Matthew Henderson, and Ivan Vulic. "Efficient Intent Detection with Dual Sentence Encoders". In: *ACL 2020* (2020), p. 38.
+
+[86] Mehrdad Farajtabar, Navid Azizan, Alex Mott, and Ang Li. "Orthogonal gradient descent for continual learning". In: *International conference on artificial intelligence and statistics*. PMLR. 2020, pp. 3762--3773.
+
+[87] Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair, Aaron Courville, and Yoshua Bengio. "Generative adversarial networks". In: *Communications of the ACM* 63.11 (2020), pp. 139--144.
+
+[88] Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. "Scaling laws for neural language models". In: *arXiv preprint arXiv:2001.08361* (2020).
+
+[89] Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and Francois Fleuret. "Transformers are rnns: Fast autoregressive transformers with linear attention". In: *International conference on machine learning*. PMLR. 2020, pp. 5156--5165.
+
+[90] Liyuan Liu, Haoming Jiang, Pengcheng He, Weizhu Chen, Xiaodong Liu, Jianfeng Gao, and Jiawei Han. "On the Variance of the Adaptive Learning Rate and Beyond". In: *International Conference on Learning Representations*. 2020.
+
+[91] Noam Shazeer. "Glu variants improve transformer". In: *arXiv preprint arXiv:2002.05202* (2020).
+
+[92] Pradeep Dasigi, Kyle Lo, Iz Beltagy, Arman Cohan, Noah A Smith, and Matt Gardner. "A dataset of information-seeking questions and answers anchored in research papers". In: *arXiv preprint arXiv:2105.03011* (2021).
+
+[93] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby. "An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale". In: *International Conference on Learning Representations*. 2021.
+
+[94] Akihiro Goto, Ayaka Bota, Ken Miya, Jingbo Wang, Suzune Tsukamoto, Xinzhi Jiang, Daichi Hirai, Masanori Murayama, Tomoki Matsuda, Thomas J. McHugh, Takeharu Nagai, and Yasunori Hayashi. "Stepwise synaptic plasticity events drive the early phase of memory consolidation". In: *Science* 374.6569 (2021), pp. 857--863. doi: 10.1126/science.abj9195.
+
+[95] Kazuki Irie, Imanol Schlag, Robert Csordas, and Juergen Schmidhuber. "Going beyond linear transformers with recurrent fast weight programmers". In: *Advances in neural information processing systems* 34 (2021), pp. 7703--7717.
+
+[96] John Jumper, Richard Evans, Alexander Pritzel, Tim Green, Michael Figurnov, Olaf Ronneberger, Kathryn Tunyasuvunakool, Russ Bates, Augustin Zidek, Anna Potapenko, et al. "Highly accurate protein structure prediction with AlphaFold". In: *nature* 596.7873 (2021), pp. 583--589.
+
+[97] Tal Ridnik, Emanuel Ben-Baruch, Asaf Noy, and Lihi Zelnik-Manor. "ImageNet-21K Pretraining for the Masses". In: *Thirty-fifth Conference on Neural Information Processing Systems Datasets and Benchmarks Track (Round 1)*. 2021.
+
+[98] Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and Yejin Choi. "Winogrande: An adversarial winograd schema challenge at scale". In: *Communications of the ACM* 64.9 (2021), pp. 99--106.
+
+[99] Imanol Schlag, Kazuki Irie, and Juergen Schmidhuber. "Linear transformers are secretly fast weight programmers". In: *International Conference on Machine Learning*. PMLR. 2021, pp. 9355--9366.
+
+[100] Ekin Akyurek, Dale Schuurmans, Jacob Andreas, Tengyu Ma, and Denny Zhou. "What learning algorithm is in-context learning? investigations with linear models". In: *arXiv preprint arXiv:2211.15661* (2022).
+
+[101] Aydar Bulatov, Yury Kuratov, and Mikhail Burtsev. "Recurrent memory transformer". In: *Advances in Neural Information Processing Systems* 35 (2022), pp. 11079--11091.
+
+[102] Yanda Chen, Ruiqi Zhong, Sheng Zha, George Karypis, and He He. "Meta-learning via Language Model In-context Tuning". In: *Proceedings of the 60th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers)*. 2022, pp. 719--730.
+
+[103] Alexandre Defossez, Leon Bottou, Francis Bach, and Nicolas Usunier. "A Simple Convergence Proof of Adam and Adagrad". In: *Transactions on Machine Learning Research* (2022). ISSN: 2835-8856.
+
+[104] Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, et al. "Training compute-optimal large language models". In: *arXiv preprint arXiv:2203.15556* (2022).
+
+[105] Kazuki Irie, Francesco Faccio, and Jurgen Schmidhuber. "Neural differential equations for learning to program neural nets through continuous learning rules". In: *Advances in Neural Information Processing Systems* 35 (2022), pp. 38614--38628.
+
+[106] Kazuki Irie, Imanol Schlag, Robert Csordas, and Juergen Schmidhuber. "A modern self-referential weight matrix that learns to modify itself". In: *International Conference on Machine Learning*. PMLR. 2022, pp. 9660--9677.
+
+[107] William Merrill, Ashish Sabharwal, and Noah A Smith. "Saturated transformers are constant-depth threshold circuits". In: *Transactions of the Association for Computational Linguistics* 10 (2022), pp. 843--856.
+
+[108] Dheeraj S Roy, Young-Gyun Park, Minyoung E Kim, Ying Zhang, Sachie K Ogawa, Nicholas DiNapoli, Xinyi Gu, Jae H Cho, Heejin Choi, Lee Kamentsky, et al. "Brain-wide mapping reveals that engrams for a single memory are distributed across multiple brain regions". In: *Nature communications* 13.1 (2022), p. 1799.
+
+[109] Yufeng Zhang, Boyi Liu, Qi Cai, Lingxiao Wang, and Zhaoran Wang. "An analysis of attention via the lens of exchangeability and latent variable models". In: *arXiv preprint arXiv:2212.14852* (2022).
+
+[110] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al. "Gpt-4 technical report". In: *arXiv preprint arXiv:2303.08774* (2023).
+
+[111] Simran Arora, Brandon Yang, Sabri Eyuboglu, Avanika Narayan, Andrew Hojel, Immanuel Trummer, and Christopher Re. "Language models enable simple systems for generating structured views of heterogeneous data lakes". In: *arXiv preprint arXiv:2304.09433* (2023).
+
+[112] Xiangning Chen, Chen Liang, Da Huang, Esteban Real, Kaiyuan Wang, Hieu Pham, Xuanyi Dong, Thang Luong, Cho-Jui Hsieh, Yifeng Lu, et al. "Symbolic discovery of optimization algorithms". In: *Advances in neural information processing systems* 36 (2023), pp. 49205--49233.
+
+[113] Ramin Hasani, Mathias Lechner, Tsun-Hsuan Wang, Makram Chahine, Alexander Amini, and Daniela Rus. "Liquid Structural State-Space Models". In: *The Eleventh International Conference on Learning Representations*. 2023.
+
+[114] Kazuki Irie, Robert Csordas, and Juergen Schmidhuber. "Practical computational power of linear transformers and their recurrent and self-referential extensions". In: *arXiv preprint arXiv:2310.16076* (2023).
+
+[115] Erik Nijkamp, Bo Pang, Hiroaki Hayashi, Lifu Tu, Huan Wang, Yingbo Zhou, Silvio Savarese, and Caiming Xiong. "CodeGen: An Open Large Language Model for Code with Multi-Turn Program Synthesis". In: *The Eleventh International Conference on Learning Representations*. 2023.
+
+[116] Bo Peng, Eric Alcaide, Quentin Gregory Anthony, Alon Albalak, Samuel Arcadinho, Stella Biderman, Huanqi Cao, Xin Cheng, Michael Nguyen Chung, Leon Derczynski, Xingjian Du, Matteo Grella, Kranthi Kiran GV, Xuzheng He, Haowen Hou, Przemyslaw Kazienko, Jan Kocon, Jiaming Kong, Bartlomiej Koptyra, Hayden Lau, Jiaju Lin, Krishna Sri Ipsit Mantri, Ferdinand Mom, Atsushi Saito, Guangyu Song, Xiangru Tang, Johan S. Wind, Stanislaw Wozniak, Zhenyuan Zhang, Qinghua Zhou, Jian Zhu, and Rui-Jie Zhu. "RWKV: Reinventing RNNs for the Transformer Era". In: *The 2023 Conference on Empirical Methods in Natural Language Processing*. 2023.
+
+[117] Michael Poli, Stefano Massaroli, Eric Nguyen, Daniel Y Fu, Tri Dao, Stephen Baccus, Yoshua Bengio, Stefano Ermon, and Christopher Re. "Hyena hierarchy: Towards larger convolutional language models". In: *International Conference on Machine Learning*. PMLR. 2023, pp. 28043--28078.
+
+[118] Rylan Schaeffer, Brando Miranda, and Sanmi Koyejo. "Are emergent abilities of large language models a mirage?" In: *Advances in neural information processing systems* 36 (2023), pp. 55565--55581.
+
+[119] Aaditya Singh, Stephanie Chan, Ted Moskovitz, Erin Grant, Andrew Saxe, and Felix Hill. "The transient nature of emergent in-context learning in transformers". In: *Advances in neural information processing systems* 36 (2023), pp. 27801--27819.
+
+[120] Yutao Sun, Li Dong, Shaohan Huang, Shuming Ma, Yuqing Xia, Jilong Xue, Jianyong Wang, and Furu Wei. "Retentive network: A successor to transformer for large language models". In: *arXiv preprint arXiv:2307.08621* (2023).
+
+[121] Johannes Von Oswald, Maximilian Schlegel, Alexander Meulemans, Seijin Kobayashi, Eyvind Niklasson, Nicolas Zucchet, Nino Scherrer, Nolan Miller, Mark Sandler, Max Vladymyrov, et al. "Uncovering mesa-optimization algorithms in transformers". In: *arXiv preprint arXiv:2309.05858* (2023).
+
+[122] Wenhai Wang, Zhe Chen, Xiaokang Chen, Jiannan Wu, Xizhou Zhu, Gang Zeng, Ping Luo, Tong Lu, Jie Zhou, Yu Qiao, et al. "Visionllm: Large language model is also an open-ended decoder for vision-centric tasks". In: *Advances in Neural Information Processing Systems* 36 (2023), pp. 61501--61513.
+
+[123] Ekin Akyurek, Mehul Damani, Adam Zweiger, Linlu Qiu, Han Guo, Jyothish Pari, Yoon Kim, and Jacob Andreas. "The Surprising Effectiveness of Test-Time Training for Few-Shot Learning". In: *Forty-second International Conference on Machine Learning*. 2024.
+
+[124] Ekin Akyurek, Bailin Wang, Yoon Kim, and Jacob Andreas. "In-context language learning: Architectures and algorithms". In: *arXiv preprint arXiv:2401.12973* (2024).
+
+[125] Simran Arora, Sabri Eyuboglu, Michael Zhang, Aman Timalsina, Silas Alberti, James Zou, Atri Rudra, and Christopher Re. "Simple linear attention language models balance the recall-throughput tradeoff". In: *Forty-first International Conference on Machine Learning*. 2024.
+
+[126] Maximilian Beck, Korbinian Poppel, Markus Spanring, Andreas Auer, Oleksandra Prudnikova, Michael Kopp, Gunter Klambauer, Johannes Brandstetter, and Sepp Hochreiter. "xLSTM: Extended Long Short-Term Memory". In: *arXiv preprint arXiv:2405.04517* (2024).
+
+[127] Aleksandar Botev, Soham De, Samuel L Smith, Anushan Fernando, George-Cristian Muraru, Ruba Haroun, Leonard Berrada, Razvan Pascanu, Pier Giuseppe Sessa, Robert Dadashi, et al. "RecurrentGemma: Moving Past Transformers for Efficient Open Language Models". In: *arXiv preprint arXiv:2404.07839* (2024).
+
+[128] Jonathan Daume, Jan Kaminski, Andrea G. P. Schjetnan, Yousef Salimpour, Umais Khan, Michael Kyzar, Chrystal M. Reed, William S. Anderson, Taufik A. Valiante, Adam N. Mamelak, and Ueli Rutishauser. "Control of working memory by phase--amplitude coupling of human hippocampal neurons". In: *Nature* 629 (2024), pp. 393--401. doi: 10.1038/s41586-024-07309-z.
+
+[129] Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, et al. "The llama 3 herd of models". In: *arXiv e-prints* (2024), arXiv--2407.
+
+[130] Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, and Boris Ginsburg. "RULER: What's the Real Context Size of Your Long-Context Language Models?" In: *First Conference on Language Modeling*. 2024.
+
+[131] K Jordan, Y Jin, V Boza, Y Jiacheng, F Cecista, L Newhouse, and J Bernstein. "Muon: An optimizer for hidden layers in neural networks, 2024b". In: *URL https://kellerjordan.github.io/posts/muon* (2024).
+
+[132] Praneeth Kacham, Vahab Mirrokni, and Peilin Zhong. "PolySketchFormer: Fast Transformers via Sketching Polynomial Kernels". In: *Proceedings of the 41st International Conference on Machine Learning*. Ed. by Ruslan Salakhutdinov, Zico Kolter, Katherine Heller, Adrian Weller, Nuria Oliver, Jonathan Scarlett, and Felix Berkenkamp. Vol. 235. Proceedings of Machine Learning Research. PMLR, July 2024, pp. 22748--22770.
+
+[133] Yuri Kuratov, Aydar Bulatov, Petr Anokhin, Ivan Rodkin, Dmitry Igorevich Sorokin, Artyom Sorokin, and Mikhail Burtsev. "BABILong: Testing the Limits of LLMs with Long Context Reasoning-in-a-Haystack". In: *The Thirty-eight Conference on Neural Information Processing Systems Datasets and Benchmarks Track*. 2024.
+
+[134] Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang, Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng, Chenyu Zhang, Chong Ruan, et al. "Deepseek-v3 technical report". In: *arXiv preprint arXiv:2412.19437* (2024).
+
+[135] Bo Liu, Rui Wang, Lemeng Wu, Yihao Feng, Peter Stone, and Qiang Liu. "Longhorn: State space models are amortized online learners". In: *arXiv preprint arXiv:2407.14207* (2024).
+
+[136] William Merrill, Jackson Petty, and Ashish Sabharwal. "The Illusion of State in State-Space Models". In: *Forty-first International Conference on Machine Learning*. 2024.
+
+[137] Guilherme Penedo, Hynek Kydlicek, Anton Lozhkov, Margaret Mitchell, Colin A Raffel, Leandro Von Werra, Thomas Wolf, et al. "The fineweb datasets: Decanting the web for the finest text data at scale". In: *Advances in Neural Information Processing Systems* 37 (2024), pp. 30811--30849.
+
+[138] Bo Peng, Daniel Goldstein, Quentin Anthony, Alon Albalak, Eric Alcaide, Stella Biderman, Eugene Cheah, Xingjian Du, Teddy Ferdinan, Haowen Hou, et al. "Eagle and finch: Rwkv with matrix-valued states and dynamic recurrence". In: *arXiv preprint arXiv:2404.05892* (2024).
+
+[139] Michael Poli, Armin W Thomas, Eric Nguyen, Pragaash Ponnusamy, Bjorn Deiseroth, Kristian Kersting, Taiji Suzuki, Brian Hie, Stefano Ermon, Christopher Re, et al. "Mechanistic design and scaling of hybrid architectures". In: *arXiv preprint arXiv:2403.17844* (2024).
+
+[140] Liliang Ren, Yang Liu, Yadong Lu, Yelong Shen, Chen Liang, and Weizhu Chen. "Samba: Simple Hybrid State Space Models for Efficient Unlimited Context Language Modeling". In: *arXiv preprint arXiv:2406.07522* (2024).
+
+[141] Ivan Rodkin, Yuri Kuratov, Aydar Bulatov, and Mikhail Burtsev. "Associative recurrent memory transformer". In: *arXiv preprint arXiv:2407.04841* (2024).
+
+[142] Clayton Sanford, Daniel Hsu, and Matus Telgarsky. "Transformers, parallel computation, and logarithmic depth". In: *Forty-first International Conference on Machine Learning*. 2024.
+
+[143] Yu Sun, Xinhao Li, Karan Dalal, Jiarui Xu, Arjun Vikram, Genghan Zhang, Yann Dubois, Xinlei Chen, Xiaolong Wang, Sanmi Koyejo, et al. "Learning to (learn at test time): Rnns with expressive hidden states". In: *arXiv preprint arXiv:2407.04620* (2024).
+
+[144] Garrett Tanzer, Mirac Suzgun, Eline Visser, Dan Jurafsky, and Luke Melas-Kyriazi. "A Benchmark for Learning to Translate a New Language from One Grammar Book". In: *The Twelfth International Conference on Learning Representations*. 2024.
+
+[145] Wannan Yang, Chen Sun, Roman Huszar, Thomas Hainmueller, Kirill Kiselev, and Gyorgy Buzsaki. "Selection of experience for memory by hippocampal sharp wave ripples". In: *Science* 383.6690 (2024), pp. 1478--1483.
+
+[146] Ruiqi Zhang, Spencer Frei, and Peter L Bartlett. "Trained transformers learn linear models in-context". In: *Journal of Machine Learning Research* 25.49 (2024), pp. 1--55.
+
+[147] Yushun Zhang, Congliang Chen, Tian Ding, Ziniu Li, Ruoyu Sun, and Zhiquan Luo. "Why transformers need adam: A hessian perspective". In: *Advances in neural information processing systems* 37 (2024), pp. 131786--131823.
+
+[148] Lisa Adams, Felix Busch, Tianyu Han, Jean-Baptiste Excoffier, Matthieu Ortala, Alexander Loser, Hugo JWL Aerts, Jakob Nikolas Kather, Daniel Truhn, and Keno Bressem. "Longhealth: A question answering benchmark with long clinical documents". In: *Journal of Healthcare Informatics Research* (2025), pp. 1--17.
+
+[149] Zeyuan Allen-Zhu. "Physics of Language Models: Part 4.1, Architecture Design and the Magic of Canon Layers". In: *SSRN Electronic Journal* (May 2025).
+
+[150] Shaden Alshammari, John Hershey, Axel Feldmann, William T Freeman, and Mark Hamilton. "I-Con: A Unifying Framework for Representation Learning". In: *arXiv preprint arXiv:2504.16929* (2025).
+
+[151] Ali Behrouz, Zeman Li, Praneeth Kacham, Majid Daliri, Yuan Deng, Peilin Zhong, Meisam Razaviyayn, and Vahab Mirrokni. "Atlas: Learning to optimally memorize the context at test time". In: *arXiv preprint arXiv:2505.23735* (2025).
+
+[152] Ali Behrouz, Meisam Razaviyayn, Peilin Zhong, and Vahab Mirrokni. "It's All Connected: A Journey Through Test-Time Memorization, Attentional Bias, Retention, and Online Optimization". In: *arXiv preprint arXiv:2504.13173* (2025).
+
+[153] Ali Behrouz, Peilin Zhong, and Vahab Mirrokni. "Titans: Learning to Memorize at Test Time". In: *The Thirty-ninth Annual Conference on Neural Information Processing Systems*. 2025.
+
+[154] Franz Louis Cesista. *Heuristic Solutions for Steepest Descent on the Stiefel manifold*. July 2025.
+
+[155] Gheorghe Comanici, Eric Bieber, Mike Schaekermann, Ice Pasupat, Noveen Sachdeva, Inderjit Dhillon, Marcel Blistein, Ori Ram, Dan Zhang, Evan Rosen, et al. "Gemini 2.5: Pushing the frontier with advanced reasoning, multimodality, long context, and next generation agentic capabilities". In: *arXiv preprint arXiv:2507.06261* (2025).
+
+[156] Francesco Pappone Devan Selvaraj. *Multiscale Muon*. Blogpost. Aug. 2025.
+
+[157] Benoit Dherin, Michael Munn, Hanna Mazzawi, Michael Wunder, and Javier Gonzalvo. "Learning without training: The implicit dynamics of in-context learning". In: *arXiv preprint arXiv:2507.16003* (2025).
+
+[158] Sabri Eyuboglu, Ryan Ehrlich, Simran Arora, Neel Guha, Dylan Zinsley, Emily Liu, Will Tennien, Atri Rudra, James Zou, Azalia Mirhoseini, et al. "Cartridges: Lightweight and general-purpose long context representations via self-study". In: *arXiv preprint arXiv:2506.06266* (2025).
+
+[159] Samuel J Gershman, Ila Fiete, and Kazuki Irie. "Key-value memory in the brain". In: *Neuron* 113.11 (2025), pp. 1694--1707.
+
+[160] Riccardo Grazzi, Julien Siems, Jorg K.H. Franke, Arber Zela, Frank Hutter, and Massimiliano Pontil. "Unlocking State-Tracking in Linear RNNs Through Negative Eigenvalues". In: *The Thirteenth International Conference on Learning Representations*. 2025.
+
+[161] Jiaxi Hu, Yongqi Pan, Jusen Du, Disen Lan, Xiaqiang Tang, Qingsong Wen, Yuxuan Liang, and Weigao Sun. "Improving Bilinear RNN with Closed-loop Control". In: *The Thirty-ninth Annual Conference on Neural Information Processing Systems*. 2025.
+
+[162] Kazuki Irie, Robert Csordas, and Jurgen Schmidhuber. "Metalearning Continual Learning Algorithms". In: *Transactions on Machine Learning Research* (2025). ISSN: 2835-8856.
+
+[163] Kazuki Irie and Samuel J Gershman. "Fast weight programming and linear transformers: from machine learning to neurobiology". In: *arXiv preprint arXiv:2508.08435* (2025).
+
+[164] Ben Keigwin, Dhruv Pai, and Nathan Chen. *Gram-Space Manifold Muon*. Oct. 2025.
+
+[165] Aonian Li, Bangwei Gong, Bo Yang, Boji Shan, Chang Liu, Cheng Zhu, Chunhao Zhang, Congchao Guo, Da Chen, Dong Li, et al. "Minimax-01: Scaling foundation models with lightning attention". In: *arXiv preprint arXiv:2501.08313* (2025).
+
+[166] Saleh Momeni, Sahisnu Mazumder, Zixuan Ke, and Bing Liu. "In-context continual learning assisted by an external continual learner". In: *Proceedings of the 31st International Conference on Computational Linguistics*. 2025, pp. 7292--7306.
+
+[167] Matteo Pagliardini, Pierre Ablin, and David Grangier. "The AdEMAMix Optimizer: Better, Faster, Older". In: *The Thirteenth International Conference on Learning Representations*. 2025.
+
+[168] Renhao Pei, Yihong Liu, Peiqin Lin, Francois Yvon, and Hinrich Schutze. "Understanding In-Context Machine Translation for Low-Resource Languages: A Case Study on Manchu". In: *arXiv preprint arXiv:2502.11862* (2025).
+
+[169] Bo Peng, Ruichong Zhang, Daniel Goldstein, Eric Alcaide, Haowen Hou, Janna Lu, William Merrill, Guangyu Song, Kaifeng Tan, Saiteja Utpala, et al. "RWKV-7 'Goose' with Expressive Dynamic State Evolution". In: *arXiv preprint arXiv:2503.14456* (2025).
+
+[170] Bo Peng, Ruichong Zhang, Daniel Goldstein, Eric Alcaide, Haowen Hou, Janna Lu, William Merrill, Guangyu Song, Kaifeng Tan, Saiteja Utpala, et al. "Rwkv-7 'goose' with expressive dynamic state evolution". In: *arXiv preprint arXiv:2503.14456* (2025).
+
+[171] Yuxiao Qu, Matthew Y. R. Yang, Amrith Setlur, Lewis Tunstall, Edward Emanuel Beeching, Ruslan Salakhutdinov, and Aviral Kumar. "Optimizing Test-Time Compute via Meta Reinforcement Finetuning". In: *Forty-second International Conference on Machine Learning*. 2025.
+
+[172] Chongjie Si, Debing Zhang, and Wei Shen. "Adamuon: Adaptive muon optimizer". In: *arXiv preprint arXiv:2507.11005* (2025).
+
+[173] Julien Siems, Timur Carstensen, Arber Zela, Frank Hutter, Massimiliano Pontil, and Riccardo Grazzi. "DeltaProduct: Improving State-Tracking in Linear RNNs via Householder Products". In: *The Thirty-ninth Annual Conference on Neural Information Processing Systems*. 2025.
+
+[174] David Silver and Richard S Sutton. "Welcome to the era of experience". In: *Google AI* 1 (2025).
+
+[175] Richard S. Sutton. *The OaK Architecture: A Vision of SuperIntelligence from Experience*. Keynote at the Reinforcement Learning Conference (RLC). Aug. 2025.
+
+[176] Nikhil Vyas, Depen Morwani, Rosie Zhao, Itai Shapira, David Brandfonbrener, Lucas Janson, and Sham M. Kakade. "SOAP: Improving and Stabilizing Shampoo using Adam for Language Modeling". In: *The Thirteenth International Conference on Learning Representations*. 2025.
+
+[177] Ke Alexander Wang, Jiaxin Shi, and Emily B Fox. "Test-time regression: a unifying framework for designing sequence models with associative memory". In: *arXiv preprint arXiv:2501.12352* (2025).
+
+[178] Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, junxian guo, Shang Yang, Haotian Tang, Yao Fu, and Song Han. "DuoAttention: Efficient Long-Context LLM Inference with Retrieval and Streaming Heads". In: *The Thirteenth International Conference on Learning Representations*. 2025.
+
+[179] hongzhou yu, Tianhao Cheng, Yingwen Wang, Wen He, Qing Wang, Ying Cheng, Yuejie Zhang, Rui Feng, and Xiaobo Zhang. "FineMedLM-o1: Enhancing Medical Knowledge Reasoning Ability of LLM from Supervised Fine-Tuning to Test-Time Training". In: *Second Conference on Language Modeling*. 2025.
+
+[180] Yifan Zhang, Zhen Qin, and Quanquan Gu. "Higher-order Linear Attention". In: *arXiv preprint arXiv:2510.27258* (2025).
+
+---
+
+## 附录
+
+### A. 嵌套学习和嵌套系统的广义公式（Generalized Formulation for Nested Learning and Nested Systems）
+
+在本节中，我们讨论嵌套系统（nested system）和嵌套联想记忆系统（NSAM）的广义版本，这些内容在第3节中已有讨论：
+
+**定义 6（（广义）嵌套系统）。** 一个（有序的）嵌套系统是一个具有 $K$ 个（有序）层级的系统，其中每个层级 $1 \leq k \leq K$ 由一组优化问题 $\{(\mathcal{L}_i^{(k)}, \mathcal{C}_i^{(k)}, \mathbf{\Theta}_i^{(k)})\}_{i=1}^{N_k}$ 组成，其中 $\mathcal{L}_i(\cdot; \cdot)$ 是第 $i$ 个问题中的优化目标，$\mathcal{C}_i$ 是其上下文（context）（即用于优化的数据），$\mathbf{\Theta}_i$ 是其参数集，每个优化问题都使用梯度下降（gradient descent）进行优化，等价地表示为：
+
+$$\boldsymbol{\theta}_{i\,t}^{(k+1)} = \arg\min_{\mathbf{\Phi}_i^{(k)}} \mathcal{L}_i^{(k)}(\mathbf{\Phi}_i^{(k)}; x_{t+1}) + \frac{1}{2\eta_{i\,t}^{(k+1)}} \|\mathbf{\Phi}_i^{(k)} - \boldsymbol{\theta}_{i\,t}^{(k)}\|_2^2 \quad \text{where } x_{t+1} \sim \mathcal{C}_i^{(k)}, \text{ and } \mathbf{\Phi}_i^{(k)} \in \mathbf{\Theta}_i^{(k)}. \tag{98}$$
+
+**定义 7（（广义）嵌套联想记忆系统）。** 嵌套联想记忆系统（NSAM）是一个具有 $K$ 个（有序）层级的系统，其中每个层级 $1 \leq k \leq K$ 由一组优化问题 $\{(\mathcal{L}_i^{(k)}, \mathcal{C}_i^{(k)}, \mathbf{\Theta}_i^{(k)})\}_{i=1}^{N_k}$ 组成，其中 $\mathcal{C}_i = \{(\mathbf{k}_j^{(i)}, \mathbf{v}_j^{(i)})\}_{j=1}^{L_i}$ 是一组真实映射（ground-truth mappings），$\mathcal{L}_i(\cdot; \cdot, \cdot)$ 是衡量第 $i$ 个问题中记忆已学映射质量的优化目标，$\mathbf{\Theta}_i$ 是记忆参数集，每个优化问题都使用梯度下降进行优化：
+
+$$\boldsymbol{\theta}_{i\,t}^{(k+1)} = \arg\min_{\mathbf{\Phi}_i^{(k)}} \mathcal{L}_i^{(k)}(\mathbf{\Phi}_i^{(k)}; \mathbf{k}_{t+1}^{(i)}, \mathbf{v}_{t+1}^{(i)}) + \frac{1}{2\eta_{i\,t}^{(k+1)}} \|\mathbf{\Phi}_i^{(k)} - \boldsymbol{\theta}_{i\,t}^{(k)}\|_2^2 \quad \text{where } (\mathbf{k}_{t+1}^{(i)}, \mathbf{v}_{t+1}^{(i)}) \sim \mathcal{C}_i^{(k)}, \text{ and } \mathbf{\Phi}_i^{(k)} \in \mathbf{\Theta}_i^{(k)}. \tag{99}$$
+
+### B. Adam、AdaGrad及其他类似优化器作为联想记忆模块（Adam, AdaGrad, and Other Similar Optimizers as Associative Memory Modules）
+
+重新审视不使用反向传播（backpropagation）链式法则的动量项（momentum term），
+
+$$W_\ell^{t+1} = W_\ell^t + \mathbf{m}_\ell^{t+1}$$
+
+$$\mathbf{m}_\ell^{t+1} = \alpha_{\ell,t+1} \mathbf{m}_\ell^t - \eta_{\ell,t+1} \nabla_{W_\ell^t} \mathcal{L}(W_\ell^t; \mathbf{x}_{t+1}), \tag{100}$$
+
+可以将动量解释为一种无键或无值的联想记忆（associative memory）（参见 Behrouz et al. 2025b，第5节），其中梯度项 $\nabla_{W_\ell^t} \mathcal{L}(W_\ell^t; \mathbf{x}_{t+1})$ 被压缩到动量中。我们期望一个强大的动量项能够完美地记忆训练过程中所有过去的梯度，从而更好地建模当前的权重更新。为此，可以从定义一个简单的目标函数开始：
+
+$$\tilde{\mathcal{L}}_t = \sum_{i=1}^{t} \|\mathbf{m}_\ell^t \odot \mathbf{g}_{\ell}^{i+1} - \mathbf{P}_\ell^t\|_2^2 + \lambda_\ell \|\mathbf{m}_\ell^t\|_F^2, \tag{101}$$
+
+其中 $\mathbf{g}_\ell^{t+1} = -\nabla_{W_\ell^t} \mathcal{L}(W_\ell^t; \mathbf{x}_{t+1})$。该目标旨在找到一个动量项，使其不只是简单地将梯度映射为1（这也会导致动量中有限的记忆管理），而是将梯度映射到过去数据样本的某个全局属性（global property）。这个全局属性的表达能力越强，动量就能越准确地整合过去的压缩信息。相应地，公式101中的目标函数承认一个最优联想记忆，将梯度映射到 $\mathbf{P}_\ell^{t+1}$，其形式为：
+
+$$\mathbf{m}_{\ell,i}^{(t)*} = \left(\mathbf{H}_{\ell,i}^{(t)} + \lambda_\ell \mathbf{I}\right)^{-1} \odot \mathbf{M}_{\ell,i}^{(t)} = \left(\mathbf{H}_{\ell,i}^{(t)} + \lambda_\ell \mathbf{I}\right)^{-1} \odot \tilde{\mathbf{M}}_{\ell,i+1}^{(t)} \odot \mathbf{P}_\ell^t,$$
+
+其中
+
+$$\mathbf{M}_{\ell,i+1}^{(t)} = \mathbf{M}_{\ell,i}^{(t)} + \beta_1 \mathbf{g}_{\ell}^{i+1} \odot \mathbf{P}_\ell^t = \tilde{\mathbf{M}}_{\ell,i+1}^{(t)} \odot \mathbf{P}_\ell^t, \tag{102}$$
+
+$$\tilde{\mathbf{M}}_{\ell,i+1}^{(t)} = \mathbf{M}_{\ell,i}^{(t)} + \beta_1 \mathbf{g}_{\ell}^{i+1},$$
+
+$$\mathbf{H}_{\ell,i+1}^{(t)} = \mathbf{H}_{\ell,i}^{(t)} + \beta_2 \mathbf{g}_{\ell}^{i+1} \odot \mathbf{g}_{\ell}^{i+1} = \mathbf{H}_{\ell,i}^{(t)} + \beta_2 (\mathbf{g}_{\ell}^{i+1})^2.$$
+
+给定此解，可以将更新步骤写为：
+
+$$W_\ell^{i+1} = W_\ell^i - \eta_t \mathbf{m}_{\ell,i}^{(t)*} = W_\ell^i - \eta_i \left(\mathbf{H}_{\ell,i}^{(t)} + \lambda_\ell \mathbf{I}\right)^{-1} \odot \tilde{\mathbf{M}}_{\ell,i+1}^{(t)} \odot \mathbf{P}_\ell^t. \tag{103}$$
+
+我们从一个简单的情况开始，其中 $\mathbf{P}_\ell^t$ 是过去梯度平方的累加和：即 $\mathbf{P}_\ell^t = \sum_{i=1}^{t} (\mathbf{g}_{\ell}^{i+1})^2$。当选择 $\lambda \to 0$ 时，公式103恢复为带动量的简单梯度下降。即，令 $\lambda = 0$，我们有：
+
+$$W_\ell^{i+1} = W_\ell^i - \eta_t \mathbf{m}_{\ell,i}^{(t)*} = W_\ell^i - \eta_i \left(\mathbf{H}_{\ell,i}^{(t)}\right)^{-1} \odot \tilde{\mathbf{M}}_{\ell,i+1}^{(t)} \odot \underbrace{\mathbf{P}_\ell^t}_{\mathbf{H}_{\ell,i}^{(t)}/\beta_2} = W_\ell^i - \eta_t \beta_2 \tilde{\mathbf{M}}_{\ell,i+1}^{(t)}, \tag{104}$$
+
+根据 $\tilde{\mathbf{M}}_{\ell,i+1}^{(t)}$ 的定义，该更新规则等价于带动量的梯度下降。接下来，我们探索一种更复杂的设计选择，其中 $\mathbf{P}_\ell^t$ 作为第 $t+1$ 个token之前数据样本的方差（variance）。在这种情况下，形式上 $\mathbf{P}_\ell^t = \sqrt{\sum_{i=1}^{t} (\mathbf{g}_{\ell}^{i+1})^2}$，因此更新规则如下：
+
+$$W_\ell^{i+1} = W_\ell^i - \eta_t \mathbf{m}_{\ell,i}^{(t)*} = W_\ell^i - \eta_i \left(\mathbf{H}_{\ell,i}^{(t)} + \lambda_\ell \mathbf{I}\right)^{-1} \odot \tilde{\mathbf{M}}_{\ell,i+1}^{(t)} \odot \underbrace{\mathbf{P}_\ell^t}_{\frac{1}{\sqrt{\beta_2}} (\mathbf{H}_{\ell,i}^{(t)})^{1/2}} \approx W_\ell^i - \frac{\eta_t}{\sqrt{\beta_2} (\mathbf{H}_{\ell,i}^{(t)})^{1/2} + \varepsilon} \tilde{\mathbf{M}}_{\ell,i}^{(t)} \tag{105}$$
+
+这等价于流行的Adam优化器（Kingma et al. 2014a）。因此，Adam是在公式101定义的 $L_2$ 回归目标下的最优联想记忆。事实上，Adam在每个状态下的更新分量旨在学习梯度与其方差（作为过去数据样本的全局属性）之间的映射。关于这一公式化的一个有趣之处在于元素的频率。观察Adam优化器中的一阶动量和二阶动量，这两个记忆的更新频率相同，因为它们都在每个样本之后更新。此外，它们各自的计算可以并行完成，因此是独立的。相应地，这是少数几个没有内部梯度流的两个组件被放置在相同频率和相同层级的例子之一（参见第3.2节）。
+
+超越逐元素更新，我们用外积（outer-product）运算重新表述公式101为：
+
+$$\tilde{\mathcal{L}}_t = \sum_{i=1}^{t} \|\mathbf{m}_\ell^t \mathbf{g}_{\ell}^{i+1} - \mathbf{P}_\ell^t\|_2^2 + \lambda_\ell \|\mathbf{m}_\ell^t\|_F^2, \tag{106}$$
+
+其中 $\mathbf{g}_\ell^{t+1} = -\nabla_{W_\ell^t} \mathcal{L}(W_\ell^t; \mathbf{x}_{t+1})$。类似于公式102，上述目标的最优解定义为：
+
+$$\mathbf{m}_{\ell,i}^{(t)*} = \left(\mathbf{H}_{\ell,i}^{(t)} + \lambda_\ell \mathbf{I}\right)^{-1} \mathbf{M}_{\ell,i}^{(t)} = \left(\mathbf{H}_{\ell,i}^{(t)} + \lambda_\ell \mathbf{I}\right)^{-1} \tilde{\mathbf{M}}_{\ell,i+1}^{(t)} \mathbf{P}_\ell^t, \tag{107}$$
+
+其中
+
+$$\mathbf{M}_{\ell,i+1}^{(t)} = \mathbf{M}_{\ell,i}^{(t)} + \beta_1 \mathbf{P}_\ell^t \mathbf{g}_{\ell}^{i+1\top} = \mathbf{P}_\ell^t \tilde{\mathbf{M}}_{\ell,i+1}^{(t)}, \tag{108}$$
+
+$$\tilde{\mathbf{M}}_{\ell,i+1}^{(t)} = \mathbf{M}_{\ell,i}^{(t)} + \beta_1 \mathbf{g}_{\ell}^{i+1\top}, \tag{109}$$
+
+$$\mathbf{H}_{\ell,i+1}^{(t)} = \mathbf{H}_{\ell,i}^{(t)} + \beta_2 \mathbf{g}_{\ell}^{i+1} \mathbf{g}_{\ell}^{i+1\top}. \tag{110}$$
+
+类似于Adam的选择，即令 $\mathbf{P}_\ell^t$ 为目前为止梯度的方差，$\mathbf{P}_\ell^t = \sqrt{\sum_{i=1}^{t} \mathbf{g}_{\ell}^{i+1} \mathbf{g}_{\ell}^{i+1\top}}$，则上述解可以简化为：
+
+$$W_\ell^{i+1} = W_\ell^i - \eta_t \mathbf{m}_{\ell,i}^{(t)*} = W_\ell^i - \eta_i \left(\mathbf{H}_{\ell,i}^{(t)} + \lambda_\ell \mathbf{I}\right)^{-1} \underbrace{\mathbf{P}_\ell^t}_{\frac{1}{\sqrt{\beta_2}} (\mathbf{H}_{\ell,i}^{(t)})^{1/2}} \tilde{\mathbf{M}}_{\ell,i+1}^{(t)} \approx W_\ell^i - \frac{\eta_t}{\sqrt{\beta_2}} (\mathbf{H}_{\ell,i}^{(t)})^{-1/2} \tilde{\mathbf{M}}_{\ell,i}^{(t)} \tag{111}$$
+
+上述公式化是带动量的AdaGrad（Defossez et al. 2022），因此推广了AdaGrad（Duchi et al. 2011），即当 $\beta_1 = 1$ 的情况。类似地，基于Adam优化器（Kingma et al. 2014a）与其他算法的联系，如RMSProp（Hinton et al. 2012）、SignSGD及其基于动量的变体（Bernstein et al. 2018）、NAdam（Dozat 2016）、AMSGrad（Reddi et al. 2016）、RAdam（Liu et al. 2020）和Lion（Chen et al. 2023），以及考虑AdaGrad与Shampoo（Gupta et al. 2018）和Soap（Vyas et al. 2025）等优化器的联系——即作为预条件项（preconditioning term）的近似——我们可以得出结论：所有这些优化器都可以重新表述为旨在压缩梯度的联想记忆。
+
+### C. 带归一化的Delta梯度下降（Delta Gradient Descent with Normalization）
+
+在第4.5节中，我们讨论了梯度下降可以被视为一种联想记忆，并可以重新表述为：
+
+$$W_{t+1} = \arg\min_{W} \langle W\mathbf{x}_t, \nabla_{y_t} \mathcal{L}(W_t; \mathbf{x}_t) \rangle + \frac{1}{2\eta_t} \|W - W_t\|_2^2, \tag{112}$$
+
+其中每一步旨在学习负梯度方向。由于该学习规则仅使用依赖于当前梯度的更新项，我们定义 $\mathbf{u}_t = -\nabla_{y_t} \mathcal{L}(W_t; \mathbf{x}_t)$，并将上述过程扩展为具有更强表达力的 $L_2$ 回归损失目标的Delta梯度下降（Delta Gradient Descent）：
+
+$$W_{t+1} = \arg\min_{W} \frac{1}{2} \|W\mathbf{x}_t - \mathbf{u}_t\|_2^2 + \frac{1}{2\eta_t} \|W - W_t\|_2^2. \tag{113}$$
+
+我们假设 $\mathbf{x}_t$ 已被归一化（normalized）（例如，在归一化记忆系统或具有归一化层的神经网络中，$\|\mathbf{x}_t\|_2 = \lambda$）。对上述目标求梯度以进行优化，
+
+$$2(W_{t+1}\mathbf{x}_t - \nabla_{y_t} \mathcal{L}(W_t, \mathbf{x}_t))\mathbf{x}_t^\top + 2\eta_t(W_{t+1} - W_t) = 0, \tag{114}$$
+
+$$W_{t+1}(\mathbf{x}_t \mathbf{x}_t^\top + \eta_t I) = \nabla_{y_t} \mathcal{L}(W_t, \mathbf{x}_t)\mathbf{x}_t^\top + \eta_t W_t, \tag{115}$$
+
+由此得到：
+
+$$\Rightarrow W_{t+1} = (\nabla_{y_t} \mathcal{L}(W_t, x_t)x_t^\top + \eta_t W_t)(\mathbf{x}_t \mathbf{x}_t^\top + \eta_t I)^{-1}. \tag{116}$$
+
+为计算 $(\mathbf{x}_t \mathbf{x}_t^\top + \eta_t I)^{-1}$ 项，使用Sherman-Morrison引理（Sherman-Morrison lemma），我们有：
+
+$$(x_t x_t^\top + \eta_t I)^{-1} = \frac{1}{\eta_t}\left(I - \frac{1}{\lambda^2 + \eta_t} \mathbf{x}_t \mathbf{x}_t^\top\right), \tag{117}$$
+
+因此：
+
+$$W_{t+1} = (\nabla_{y_t} \mathcal{L}(W_t, \mathbf{x}_t)\mathbf{x}_t^\top + \eta_t W_t) \frac{1}{\eta_t}\left(I - \frac{1}{\lambda^2 + \eta_t} \mathbf{x}_t \mathbf{x}_t^\top\right) \tag{118}$$
+
+$$\Rightarrow W_{t+1} = W_t\left(I - \frac{1}{\lambda^2 + \eta_t}\mathbf{x}_t \mathbf{x}_t^\top\right) + \frac{1}{\eta_t}\nabla_{y_t}\mathcal{L}(W_t, \mathbf{x}_t)\mathbf{x}_t^\top - \underbrace{\frac{\lambda}{\lambda^2\eta_t + \eta_t^2}\nabla_{y_t}\mathcal{L}(W_t, \mathbf{x}_t)\mathbf{x}_t^\top}_{\frac{\lambda}{\lambda^2\eta_t + \eta_t^2}\nabla_{y_t}\mathcal{L}(W_t, \mathbf{x}_t)\mathbf{x}_t^\top} \tag{119}$$
+
+$$\Rightarrow W_{t+1} = W_t\left(I - \frac{1}{\lambda^2 + \eta_t}\mathbf{x}_t \mathbf{x}_t^\top\right) - \beta \nabla_{y_t}\mathcal{L}(W_t, \mathbf{x}_t)\mathbf{x}_t^\top \tag{120}$$
+
+$$\Rightarrow W_{t+1} = W_t(I - \alpha_t \mathbf{x}_t \mathbf{x}_t^\top) - \beta \nabla_{y_t}\mathcal{L}(W_t, \mathbf{x}_t)\mathbf{x}_t^\top \tag{121}$$
