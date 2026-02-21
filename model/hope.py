@@ -420,6 +420,7 @@ class HopeGPT(nn.Module):
         self.output_proj = nn.Linear(d_model, vocab_size)
 
         self.context_length = context_length
+        self.gradient_checkpointing = False
 
     def forward(self, idx):
         B, T = idx.shape
@@ -429,7 +430,10 @@ class HopeGPT(nn.Module):
         x = tok_emb + pos_emb
 
         for block in self.blocks:
-            x = block(x)
+            if self.gradient_checkpointing and self.training:
+                x = torch.utils.checkpoint.checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
 
         x = self.ln_final(x)
         logits = self.output_proj(x)

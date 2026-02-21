@@ -64,13 +64,15 @@ print(f'设备: {device}')
 # ============================================================
 
 # 超参数
-d_model = 256
-n_layers = 8
-d_memory = 256          # Titans 记忆模块内部维度
+d_model = 512
+n_layers = 16
+d_memory = 512          # Titans 记忆模块内部维度
 chunk_size = 16         # Titans 分块大小
-context_length = 128
+context_length = 256
 learning_rate = 1e-3
 cms_chunk_sizes = [1, 16, 128, 1024]
+use_amp = (device == 'cuda')  # CUDA 用 FP16 混合精度，MPS/CPU 不用
+save_every = 2000             # 每 N 步自动保存 checkpoint
 
 if resume_path:
     # ---- 继续训练：从 checkpoint 加载 ----
@@ -119,15 +121,29 @@ else:
         cms_chunk_sizes=cms_chunk_sizes,
     ).to(device)
 
+    if use_amp:
+        model.gradient_checkpointing = True
+
     optimizer = M3Optimizer(model.parameters(), lr=learning_rate, slow_interval=chunk_size)
 
     print(f'从头开始训练')
     print(f'模型参数量: {sum(p.numel() for p in model.parameters()):,}')
+    if use_amp:
+        print(f'FP16 混合精度: 开启')
+        print(f'Gradient Checkpointing: 开启')
 
 print(f'训练数据: {data_file}（{len(text)} 字符，{len(data)} tokens）')
 print(f'词表大小: {tokenizer.vocab_size}')
 print(f'Titans chunk_size: {chunk_size}')
 print(f'CMS 频率层级: {cms_chunk_sizes}')
+
+# 预备 tokenizer 保存格式（定期保存 checkpoint 需要）
+if USE_HF_TOKENIZER and isinstance(tokenizer, HFBPETokenizer):
+    tok_save = {'tokenizer_type': 'hf_bpe', 'tokenizer_data': tokenizer.save_vocab()}
+elif isinstance(tokenizer, BPETokenizer):
+    tok_save = {'tokenizer_type': 'bpe', 'tokenizer_data': tokenizer.save_vocab()}
+else:
+    tok_save = {'tokenizer_text': checkpoint['tokenizer_text'] if resume_path else text}
 
 
 # ============================================================
@@ -144,6 +160,8 @@ def get_batch(batch_size=16):
 
 warmup_steps = min(100, max_steps // 10)
 print_every = max(1, max_steps // 20)
+scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
 print(f'\n开始训练（本次 {max_steps} 步，全局步数 {total_steps_so_far} → '
       f'{total_steps_so_far + max_steps}，warmup {warmup_steps} 步）...\n')
 
@@ -163,22 +181,47 @@ for step in range(max_steps):
     model.set_active_levels(global_step)
 
     x, y = get_batch()
-    logits = model(x)
-    B, T, V = logits.shape
-    loss = F.cross_entropy(logits.view(B * T, V), y.view(B * T))
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        logits = model(x)
+        B, T, V = logits.shape
+        loss = F.cross_entropy(logits.view(B * T, V), y.view(B * T))
 
     optimizer.zero_grad()
-    loss.backward()
+    scaler.scale(loss).backward()
 
     # 梯度裁剪（DGD 的记忆模块初始值梯度可能很大）
+    scaler.unscale_(optimizer)
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-    optimizer.step()
+    scaler.step(optimizer)
+    scaler.update()
 
     if step % print_every == 0:
         active_count = sum(1 for cs in cms_chunk_sizes if global_step % cs == 0)
         print(f'步骤 {global_step:>6d}（本次 {step:>5d}/{max_steps}）| '
               f'loss = {loss.item():.4f} | 活跃CMS: {active_count}/{len(cms_chunk_sizes)}')
+
+    # 定期保存 checkpoint
+    if save_every > 0 and (step + 1) % save_every == 0:
+        ckpt_step = total_steps_so_far + step + 1
+        ckpt_path = f'checkpoints/hope-full-{ckpt_step}steps.pt'
+        os.makedirs('checkpoints', exist_ok=True)
+        torch.save({
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            **tok_save,
+            'total_steps': ckpt_step,
+            'config': {
+                'vocab_size': tokenizer.vocab_size,
+                'd_model': d_model, 'n_layers': n_layers,
+                'd_memory': d_memory, 'chunk_size': chunk_size,
+                'context_length': context_length,
+                'cms_chunk_sizes': cms_chunk_sizes,
+            },
+            'model_type': 'hope-full',
+        }, ckpt_path)
+        print(f'  → checkpoint 已保存: {ckpt_path}')
 
 total_steps_so_far += max_steps
 print(f'\n训练完成！最终 loss = {loss.item():.4f}')
@@ -191,21 +234,6 @@ print(f'累计训练步数: {total_steps_so_far}')
 
 os.makedirs('checkpoints', exist_ok=True)
 save_path = f'checkpoints/hope-full-{total_steps_so_far}steps.pt'
-
-if USE_HF_TOKENIZER and isinstance(tokenizer, HFBPETokenizer):
-    tok_save = {
-        'tokenizer_type': 'hf_bpe',
-        'tokenizer_data': tokenizer.save_vocab(),
-    }
-elif isinstance(tokenizer, BPETokenizer):
-    tok_save = {
-        'tokenizer_type': 'bpe',
-        'tokenizer_data': tokenizer.save_vocab(),
-    }
-else:
-    tok_save = {
-        'tokenizer_text': checkpoint['tokenizer_text'] if resume_path else text,
-    }
 
 save_data = {
     'model': model.state_dict(),
