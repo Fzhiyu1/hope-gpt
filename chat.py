@@ -9,8 +9,10 @@
 import sys
 import torch
 import torch.nn.functional as F
-from model.tokenizer import CharTokenizer
+from model.tokenizer import load_tokenizer_from_checkpoint
 from model.gpt import MiniGPT
+from model.hope_attention import HopeAttentionGPT
+from model.hope import HopeGPT
 
 # 加载模型
 model_path = sys.argv[1] if len(sys.argv) > 1 else None
@@ -26,17 +28,28 @@ print(f'加载模型: {model_path}')
 checkpoint = torch.load(model_path, weights_only=False)
 config = checkpoint['config']
 
-# 重建 tokenizer
-tokenizer = CharTokenizer(checkpoint['tokenizer_text'])
+# 重建 tokenizer（自动识别 BPE 或 Char）
+tokenizer = load_tokenizer_from_checkpoint(checkpoint)
 
-# 重建模型并加载参数
-device = 'mps' if torch.backends.mps.is_available() else 'cpu'
-model = MiniGPT(**config).to(device)
+# 重建模型并加载参数（自动识别模型类型）
+if torch.cuda.is_available():
+    device = 'cuda'
+elif torch.backends.mps.is_available():
+    device = 'mps'
+else:
+    device = 'cpu'
+model_type = checkpoint.get('model_type', '')
+if model_type == 'hope-full':
+    model = HopeGPT(**config).to(device)
+elif 'chunk_sizes' in config:
+    model = HopeAttentionGPT(**config).to(device)
+else:
+    model = MiniGPT(**config).to(device)
 model.load_state_dict(checkpoint['model'])
 model.eval()
 
 print(f'模型已加载（{sum(p.numel() for p in model.parameters()):,} 参数）')
-print(f'词表: {"".join(tokenizer.idx_to_char.values())}')
+print(f'词表大小: {tokenizer.vocab_size}')
 print(f'输入开头文字，模型会续写。输入 q 退出。\n')
 
 
@@ -60,8 +73,5 @@ while True:
     prompt = input('你: ')
     if prompt == 'q':
         break
-    try:
-        result = generate(prompt)
-        print(f'模型: {result}\n')
-    except KeyError as e:
-        print(f'模型不认识这个字: {e}\n')
+    result = generate(prompt)
+    print(f'模型: {result}\n')
