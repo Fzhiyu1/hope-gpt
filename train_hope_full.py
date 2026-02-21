@@ -93,7 +93,7 @@ else:
     # ---- 从头训练 ----
     total_steps_so_far = 0
 
-    with open(data_file, 'r') as f:
+    with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
 
     tokenizer = BPETokenizer.train([text], target_vocab_size=8000)
